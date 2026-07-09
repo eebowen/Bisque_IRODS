@@ -115,6 +115,18 @@ function normalizeRemotePath(remotePath) {
   return value;
 }
 
+function normalizeRemoteCollectionPath(remotePath) {
+  const value = normalizeRemotePath(remotePath).replace(/\/+$/, "");
+  if (value === "/ucsb") {
+    throw new Error("Choose a folder inside your iRODS home, not /ucsb itself.");
+  }
+  return value;
+}
+
+function remoteTargetForSelection(remoteCollectionPath, selectedPath) {
+  return `${remoteCollectionPath}/${path.basename(selectedPath)}`;
+}
+
 function getPlatformAssetName(version) {
   const arch = os.arch();
   const platform = os.platform();
@@ -368,6 +380,12 @@ function shouldUseBput(summary) {
 
 function formatError(error) {
   const message = String(error && error.message ? error.message : error);
+  if (/interactive prompt|Overwrite\?/i.test(message)) {
+    return "Upload stopped because the destination already contains an item with the same name. Choose a new dataset folder or remove the existing item in BisQue/iRODS first.";
+  }
+  if (/Data object .* already exists/i.test(message)) {
+    return "That iRODS path already exists as a file, not a dataset folder. Choose a new dataset folder name and try again.";
+  }
   if (/CAT_INVALID_AUTHENTICATION|AUTHENTICATION|password|PAM_AUTH/i.test(message)) {
     return "BisQue login failed. Check your username and password, then try again.";
   }
@@ -402,12 +420,14 @@ function spawnGocmd(executable, args, uploadId) {
       const text = chunk.toString();
       stdout += text;
       emitProcessOutput(uploadId, text, false);
+      stopOnInteractivePrompt(child, reject, text);
     });
 
     child.stderr.on("data", (chunk) => {
       const text = chunk.toString();
       stderr += text;
       emitProcessOutput(uploadId, text, true);
+      stopOnInteractivePrompt(child, reject, text);
     });
 
     child.on("error", reject);
@@ -428,14 +448,28 @@ function spawnGocmd(executable, args, uploadId) {
 function emitProcessOutput(uploadId, text, isError) {
   const lines = text.split(/\r?\n/).filter(Boolean);
   for (const line of lines) {
+    const cleanLine = stripAnsi(line);
     const percent = parsePercent(line);
     sendUploadEvent(uploadId, {
       type: percent == null ? "log" : "progress",
-      message: redactSensitiveText(line),
+      message: redactSensitiveText(cleanLine),
       percent,
       isError,
     });
   }
+}
+
+function stopOnInteractivePrompt(child, reject, text) {
+  if (!/Overwrite\?\s*\[yes\(y\)\/no\(n\)\/yes-all\(a\)\/no-all\(na\)\]:/i.test(stripAnsi(text))) {
+    return;
+  }
+
+  child.kill();
+  reject(new Error("GoCommands opened an interactive overwrite prompt."));
+}
+
+function stripAnsi(text) {
+  return String(text).replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, "");
 }
 
 function parsePercent(line) {
@@ -446,6 +480,40 @@ function parsePercent(line) {
 
 function redactSensitiveText(text) {
   return String(text).replace(/irods_user_password:\s*.+/gi, "irods_user_password: [hidden]");
+}
+
+async function ensureRemoteCollection(executable, configPath, remoteCollectionPath, uploadId) {
+  sendUploadEvent(uploadId, {
+    type: "log",
+    message: `Preparing dataset folder ${remoteCollectionPath}`,
+  });
+
+  try {
+    await spawnGocmd(executable, ["-c", configPath, "mkdir", "-p", remoteCollectionPath], uploadId);
+  } catch (error) {
+    const message = String(error && error.message ? error.message : error);
+    if (/unknown shorthand|flag provided but not defined|unknown flag|invalid option/i.test(message)) {
+      try {
+        await spawnGocmd(executable, ["-c", configPath, "mkdir", remoteCollectionPath], uploadId);
+      } catch (fallbackError) {
+        if (!isCollectionAlreadyExistsError(fallbackError)) {
+          throw fallbackError;
+        }
+      }
+      return;
+    }
+
+    if (isCollectionAlreadyExistsError(error)) {
+      return;
+    }
+
+    throw error;
+  }
+}
+
+function isCollectionAlreadyExistsError(error) {
+  const message = String(error && error.message ? error.message : error);
+  return /already exists|CAT_NAME_EXISTS_AS_COLLECTION/i.test(message);
 }
 
 async function runUpload(uploadId, payload) {
@@ -461,7 +529,7 @@ async function runUpload(uploadId, payload) {
       if (!fs.existsSync(selectedPath)) throw new Error(`Selected path does not exist: ${selectedPath}`);
     }
 
-    const remotePath = normalizeRemotePath(payload.remotePath || defaultRemotePath(credentials.username));
+    const remotePath = normalizeRemoteCollectionPath(payload.remotePath || defaultRemotePath(credentials.username));
     const summary = await summarizePaths(localPaths);
     const command = payload.mode === "bput" || payload.mode === "put" ? payload.mode : summary.recommendedMode;
 
@@ -475,9 +543,11 @@ async function runUpload(uploadId, payload) {
 
     const executable = await ensureGocmd(uploadId);
     configPath = await writeTemporaryConfig(credentials.username, credentials.password, uploadId);
+    await ensureRemoteCollection(executable, configPath, remotePath, uploadId);
 
     for (let index = 0; index < localPaths.length; index += 1) {
       const selectedPath = localPaths[index];
+      const remoteTarget = remoteTargetForSelection(remotePath, selectedPath);
       const current = activeUploads.get(uploadId);
       if (!current || current.cancelled) throw new Error("Upload cancelled.");
 
@@ -487,7 +557,7 @@ async function runUpload(uploadId, payload) {
         currentPath: selectedPath,
       });
 
-      await spawnGocmd(executable, ["-c", configPath, command, "--progress", selectedPath, remotePath], uploadId);
+      await spawnGocmd(executable, ["-c", configPath, command, "--progress", selectedPath, remoteTarget], uploadId);
     }
 
     sendUploadEvent(uploadId, {
