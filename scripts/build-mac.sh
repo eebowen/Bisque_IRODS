@@ -16,7 +16,7 @@ else
 fi
 
 npm run check
-npm run dist:mac
+PUBLISH=never npm run dist:mac
 
 echo
 echo "Mac app artifact:"
