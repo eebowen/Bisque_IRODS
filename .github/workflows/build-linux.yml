@@ -1,0 +1,32 @@
+name: Build Linux App
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run check
+
+      - run: npm run dist:linux
+        env:
+          PUBLISH: never
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BisQue-iRODS-Uploader-linux-x64
+          path: dist/BisQue-iRODS-Uploader-linux-x64.AppImage

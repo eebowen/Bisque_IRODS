@@ -2,19 +2,29 @@
 
 A local Electron desktop app for uploading files and folders to BisQue iRODS storage without using the terminal.
 
-## Try A Mac Build From GitHub Actions
+## Build Releases
 
-1. Push this project to a GitHub repository.
-2. Open the repository on GitHub.
-3. Go to **Actions**.
-4. Select **Build Mac App**.
-5. Click **Run workflow**.
-6. Download the `BisQue-iRODS-Uploader-mac-universal` artifact when the workflow finishes.
-7. Unzip `BisQue-iRODS-Uploader-mac-universal.zip` and open the app.
+### Windows
 
-This first Mac build is unsigned. If macOS blocks it, right-click the app, choose **Open**, then confirm that you want to open it. You may also need to approve it in **System Settings > Privacy & Security**.
+Requirements:
 
-## Build On Your Mac
+- Windows 10 or 11
+- Node.js 18+
+- npm
+
+Run:
+
+```bat
+.\scripts\build-win.bat
+```
+
+The script creates:
+
+```text
+dist/BisQue-iRODS-Uploader-win-x64.exe
+```
+
+### macOS
 
 Requirements:
 
@@ -39,6 +49,46 @@ For an optional local DMG build, run:
 ```bash
 npm run dist:mac:dmg
 ```
+
+This first Mac build is unsigned. If macOS blocks it, right-click the app, choose **Open**, then confirm that you want to open it. You may also need to approve it in **System Settings > Privacy & Security**.
+
+### Linux
+
+Requirements:
+
+- Linux
+- Node.js 18+
+- npm
+
+Run:
+
+```bash
+./scripts/build-linux.sh
+```
+
+The script creates:
+
+```text
+dist/BisQue-iRODS-Uploader-linux-x64.AppImage
+```
+
+For a direct packaging command, run:
+
+```bash
+npm run dist:linux
+```
+
+## Try The GitHub Actions Builds
+
+1. Push this project to a GitHub repository.
+2. Open the repository on GitHub.
+3. Go to **Actions**.
+4. Select **Build Mac App**, **Build Windows**, or **Build Linux**.
+5. Click **Run workflow**.
+6. Download the matching artifact when the workflow finishes.
+7. Unzip or open the downloaded build as needed.
+
+The first macOS build is unsigned. If macOS blocks it, right-click the app, choose **Open**, then confirm that you want to open it. You may also need to approve it in **System Settings > Privacy & Security**.
 
 ## Run During Development
 
