@@ -1,0 +1,52 @@
+{
+  "name": "bisque-irod-uploader",
+  "version": "0.1.0",
+  "description": "A desktop uploader for BisQue iRODS storage using GoCommands.",
+  "main": "src/main.js",
+  "author": "",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "check": "node --check src/main.js && node --check src/preload.js && node --check src/renderer.js",
+    "dist": "electron-builder",
+    "dist:mac": "CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac zip --universal",
+    "dist:mac:dmg": "CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac dmg --universal"
+  },
+  "devDependencies": {
+    "electron": "^31.7.7",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "edu.ucsb.bisque.irod-uploader",
+    "productName": "BisQue iRODS Uploader",
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "buildResources": "build"
+    },
+    "artifactName": "BisQue-iRODS-Uploader-${os}-${arch}.${ext}",
+    "mac": {
+      "category": "public.app-category.productivity",
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "target": [
+        {
+          "target": "zip",
+          "arch": [
+            "universal"
+          ]
+        }
+      ]
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "linux": {
+      "target": "AppImage",
+      "category": "Utility"
+    }
+  }
+}

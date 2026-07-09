@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>BisQue iRODS Uploader</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="panel sidebar" aria-label="Upload setup">
+        <div class="brand">
+          <div class="brand-mark">BQ</div>
+          <div>
+            <h1>BisQue iRODS Uploader</h1>
+            <p>Local desktop uploads for large datasets</p>
+          </div>
+        </div>
+
+        <form id="login-form" class="stack">
+          <div class="section-title">
+            <span>1</span>
+            <h2>BisQue Login</h2>
+          </div>
+          <label>
+            Username
+            <input id="username" autocomplete="username" required />
+          </label>
+          <label>
+            Password
+            <input id="password" type="password" autocomplete="current-password" required />
+          </label>
+          <div class="button-row">
+            <button type="submit" class="primary">Save Login</button>
+            <button type="button" id="test-connection">Test</button>
+          </div>
+          <p id="auth-status" class="status muted">Credentials stay on this computer.</p>
+        </form>
+
+        <section class="stack">
+          <div class="section-title">
+            <span>2</span>
+            <h2>Destination</h2>
+          </div>
+          <label>
+            iRODS Path
+            <input id="remote-path" value="/ucsb/home/" />
+          </label>
+        </section>
+      </section>
+
+      <section class="workspace" aria-label="Upload workspace">
+        <section id="drop-zone" class="drop-zone">
+          <div>
+            <p class="eyebrow">Drag files or folders here</p>
+            <h2>Select data to upload</h2>
+            <p>The app will choose the faster upload mode for many small files.</p>
+          </div>
+          <div class="button-row">
+            <button type="button" id="pick-files">Choose Files</button>
+            <button type="button" id="pick-folder">Choose Folder</button>
+          </div>
+        </section>
+
+        <section class="review-grid">
+          <article class="panel review">
+            <div class="section-title">
+              <span>3</span>
+              <h2>Review</h2>
+            </div>
+            <div id="empty-selection" class="empty">No files selected yet.</div>
+            <ul id="selection-list" class="selection-list"></ul>
+          </article>
+
+          <article class="panel summary">
+            <dl>
+              <div>
+                <dt>Files</dt>
+                <dd id="file-count">0</dd>
+              </div>
+              <div>
+                <dt>Total Size</dt>
+                <dd id="total-size">0 B</dd>
+              </div>
+              <div>
+                <dt>Mode</dt>
+                <dd>
+                  <select id="upload-mode">
+                    <option value="auto">Auto</option>
+                    <option value="put">put</option>
+                    <option value="bput">bput</option>
+                  </select>
+                </dd>
+              </div>
+            </dl>
+            <button type="button" id="start-upload" class="primary wide" disabled>Start Upload</button>
+            <button type="button" id="cancel-upload" class="danger wide" disabled>Cancel Upload</button>
+          </article>
+        </section>
+
+        <section class="panel progress-panel">
+          <div class="progress-header">
+            <div>
+              <p class="eyebrow">Upload Status</p>
+              <h2 id="progress-title">Ready</h2>
+            </div>
+            <span id="progress-percent">0%</span>
+          </div>
+          <div class="progress-track" aria-hidden="true">
+            <div id="progress-bar"></div>
+          </div>
+          <details>
+            <summary>Details</summary>
+            <pre id="log-output"></pre>
+          </details>
+        </section>
+      </section>
+    </main>
+
+    <script src="./renderer.js"></script>
+  </body>
+</html>
