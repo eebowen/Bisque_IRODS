@@ -92,6 +92,16 @@
                   </select>
                 </dd>
               </div>
+              <div>
+                <dt>Existing Files</dt>
+                <dd>
+                  <select id="duplicate-mode">
+                    <option value="skip">Skip existing</option>
+                    <option value="overwrite">Replace existing</option>
+                    <option value="fail">Stop upload</option>
+                  </select>
+                </dd>
+              </div>
             </dl>
             <button type="button" id="start-upload" class="primary wide" disabled>Start Upload</button>
             <button type="button" id="cancel-upload" class="danger wide" disabled>Cancel Upload</button>

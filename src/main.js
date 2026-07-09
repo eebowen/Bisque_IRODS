@@ -398,6 +398,11 @@ function formatError(error) {
   return message;
 }
 
+function isMissingRemotePathError(error) {
+  const message = String(error && error.message ? error.message : error);
+  return /does not exist|not found|CAT_NO_ROWS_FOUND|CAT_UNKNOWN|USER_FILE_DOES_NOT_EXIST|remote path.*missing/i.test(message);
+}
+
 function sendUploadEvent(uploadId, payload) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   mainWindow.webContents.send("upload:progress", {
@@ -407,7 +412,7 @@ function sendUploadEvent(uploadId, payload) {
   });
 }
 
-function spawnGocmd(executable, args, uploadId) {
+function spawnGocmd(executable, args, uploadId, options = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(executable, args, { windowsHide: true });
     const upload = activeUploads.get(uploadId);
@@ -419,15 +424,15 @@ function spawnGocmd(executable, args, uploadId) {
     child.stdout.on("data", (chunk) => {
       const text = chunk.toString();
       stdout += text;
-      emitProcessOutput(uploadId, text, false);
-      stopOnInteractivePrompt(child, reject, text);
+      if (!options.suppressOutput) emitProcessOutput(uploadId, text, false);
+      handleInteractivePrompt(child, reject, text, options);
     });
 
     child.stderr.on("data", (chunk) => {
       const text = chunk.toString();
       stderr += text;
-      emitProcessOutput(uploadId, text, true);
-      stopOnInteractivePrompt(child, reject, text);
+      if (!options.suppressOutput) emitProcessOutput(uploadId, text, true);
+      handleInteractivePrompt(child, reject, text, options);
     });
 
     child.on("error", reject);
@@ -459,8 +464,18 @@ function emitProcessOutput(uploadId, text, isError) {
   }
 }
 
-function stopOnInteractivePrompt(child, reject, text) {
+function handleInteractivePrompt(child, reject, text, options) {
   if (!/Overwrite\?\s*\[yes\(y\)\/no\(n\)\/yes-all\(a\)\/no-all\(na\)\]:/i.test(stripAnsi(text))) {
+    return;
+  }
+
+  if (options.overwriteResponse === "yes") {
+    child.stdin.write("y\n");
+    return;
+  }
+
+  if (options.overwriteResponse === "no") {
+    child.stdin.write("n\n");
     return;
   }
 
@@ -516,6 +531,23 @@ function isCollectionAlreadyExistsError(error) {
   return /already exists|CAT_NAME_EXISTS_AS_COLLECTION/i.test(message);
 }
 
+async function remotePathExists(executable, configPath, remoteTarget, uploadId) {
+  try {
+    await spawnGocmd(executable, ["-c", configPath, "ls", remoteTarget], uploadId, { suppressOutput: true });
+    return true;
+  } catch (error) {
+    if (isMissingRemotePathError(error)) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+function normalizeDuplicateMode(mode) {
+  if (mode === "overwrite" || mode === "fail") return mode;
+  return "skip";
+}
+
 async function runUpload(uploadId, payload) {
   let configPath;
   try {
@@ -532,6 +564,7 @@ async function runUpload(uploadId, payload) {
     const remotePath = normalizeRemoteCollectionPath(payload.remotePath || defaultRemotePath(credentials.username));
     const summary = await summarizePaths(localPaths);
     const command = payload.mode === "bput" || payload.mode === "put" ? payload.mode : summary.recommendedMode;
+    const duplicateMode = normalizeDuplicateMode(payload.duplicateMode);
 
     activeUploads.set(uploadId, { cancelled: false, child: null });
     sendUploadEvent(uploadId, {
@@ -551,13 +584,32 @@ async function runUpload(uploadId, payload) {
       const current = activeUploads.get(uploadId);
       if (!current || current.cancelled) throw new Error("Upload cancelled.");
 
+      if (await remotePathExists(executable, configPath, remoteTarget, uploadId)) {
+        if (duplicateMode === "skip") {
+          sendUploadEvent(uploadId, {
+            type: "log",
+            message: `Skipping ${path.basename(selectedPath)} because it already exists.`,
+          });
+          continue;
+        }
+
+        if (duplicateMode === "fail") {
+          throw new Error(`Data object "${remoteTarget}" already exists.`);
+        }
+      }
+
       sendUploadEvent(uploadId, {
         type: "file",
         message: `Uploading ${path.basename(selectedPath)} (${index + 1} of ${localPaths.length})`,
         currentPath: selectedPath,
       });
 
-      await spawnGocmd(executable, ["-c", configPath, command, "--progress", selectedPath, remoteTarget], uploadId);
+      await spawnGocmd(
+        executable,
+        ["-c", configPath, command, "--progress", selectedPath, remoteTarget],
+        uploadId,
+        { overwriteResponse: duplicateMode === "overwrite" ? "yes" : undefined },
+      );
     }
 
     sendUploadEvent(uploadId, {

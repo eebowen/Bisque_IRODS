@@ -19,6 +19,7 @@ const elements = {
   fileCount: document.querySelector("#file-count"),
   totalSize: document.querySelector("#total-size"),
   uploadMode: document.querySelector("#upload-mode"),
+  duplicateMode: document.querySelector("#duplicate-mode"),
   startUpload: document.querySelector("#start-upload"),
   cancelUpload: document.querySelector("#cancel-upload"),
   progressTitle: document.querySelector("#progress-title"),
@@ -157,6 +158,7 @@ async function startUpload() {
       localPaths: state.localPaths,
       remotePath: elements.remotePath.value,
       mode: elements.uploadMode.value,
+      duplicateMode: elements.duplicateMode.value,
     });
     state.activeUploadId = result.uploadId;
   } catch (error) {
