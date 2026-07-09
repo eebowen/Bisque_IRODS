@@ -12,7 +12,7 @@
     "dist": "electron-builder",
     "dist:mac": "CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac zip --universal",
     "dist:mac:dmg": "CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac dmg --universal",
-    "dist:win": "electron-builder --win nsis --x64"
+    "dist:win": "electron-builder --win nsis --x64 --publish never"
   },
   "devDependencies": {
     "electron": "^31.7.7",
