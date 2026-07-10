@@ -43,6 +43,13 @@
             <h2>Destination</h2>
           </div>
           <label>
+            Upload Method
+            <select id="upload-method">
+              <option value="irods">iRODS + BisQue registration</option>
+              <option value="bqapi">BisQue API only (skip iRODS)</option>
+            </select>
+          </label>
+          <label id="remote-path-field">
             iRODS Folder Path
             <input id="remote-path" value="/ucsb/home/" />
           </label>
@@ -55,7 +62,9 @@
               required
             />
           </label>
-          <p class="status muted">One new BisQue dataset will be created after each upload.</p>
+          <p id="method-hint" class="status muted">
+            Files are archived in iRODS, then registered as one new BisQue dataset.
+          </p>
         </section>
       </section>
 
@@ -92,7 +101,7 @@
                 <dt>Total Size</dt>
                 <dd id="total-size">0 B</dd>
               </div>
-              <div>
+              <div id="upload-mode-field">
                 <dt>Mode</dt>
                 <dd>
                   <select id="upload-mode">
@@ -102,7 +111,7 @@
                   </select>
                 </dd>
               </div>
-              <div>
+              <div id="duplicate-mode-field">
                 <dt>Existing Files</dt>
                 <dd>
                   <select id="duplicate-mode">

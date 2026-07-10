@@ -111,11 +111,70 @@ class BisqueClient {
       imageUris.push(...fileImageUris);
     }
 
+    return this.finalizeDataset(datasetName, imageUris, skipped, failed, config);
+  }
+
+  async createDatasetFromLocalFiles(options) {
+    const config = options || {};
+    const datasetName = normalizeDatasetName(config.datasetName);
+    const filesByPath = new Map();
+    for (const input of config.files || []) {
+      const localPath = String(input.localPath || "");
+      if (localPath && !filesByPath.has(localPath)) {
+        filesByPath.set(localPath, { localPath, name: input.name || path.basename(localPath) });
+      }
+    }
+    const files = [...filesByPath.values()];
+    const imageUris = [];
+    const skipped = [];
+    const failed = [];
+
+    if (files.length === 0) {
+      throw new BisqueApiError("No files were available for the dataset.", {
+        code: "NO_LOCAL_FILES",
+      });
+    }
+
+    for (let index = 0; index < files.length; index += 1) {
+      const file = files[index];
+      notify(config.onProgress, {
+        stage: "transfer",
+        index,
+        total: files.length,
+        name: file.name,
+        localPath: file.localPath,
+      });
+
+      let fileImageUris;
+      try {
+        const transfer = await this.transferLocalFile(file.localPath, file.name, config.signal);
+        fileImageUris = transfer.imageUris;
+      } catch (error) {
+        rethrowIfFatal(error);
+        failed.push({ name: file.name, localPath: file.localPath, reason: error.message });
+        continue;
+      }
+
+      if (fileImageUris.length === 0) {
+        skipped.push({
+          name: file.name,
+          localPath: file.localPath,
+          reason: "BisQue accepted this file, but did not identify it as an image.",
+        });
+        continue;
+      }
+      imageUris.push(...fileImageUris);
+    }
+
+    return this.finalizeDataset(datasetName, imageUris, skipped, failed, config);
+  }
+
+  async finalizeDataset(datasetName, imageUris, skipped, failed, config) {
     const uniqueImageUris = [...new Set(imageUris)];
     if (uniqueImageUris.length === 0) {
       if (failed.length > 0) {
         throw new BisqueApiError(
-          `BisQue could not register any of the uploaded files. First failure: ${failed[0].irodsPath}: ${failed[0].reason}`,
+          `BisQue could not register any of the uploaded files. First failure: ${failed[0].irodsPath || failed[0].name}: ${failed[0].reason}`,
           { code: "BISQUE_REGISTRATION_FAILED" },
         );
       }

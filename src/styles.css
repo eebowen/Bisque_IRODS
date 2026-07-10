@@ -408,3 +408,7 @@ pre {
   line-height: 1.45;
   white-space: pre-wrap;
 }
+
+[hidden] {
+  display: none !important;
+}

@@ -132,6 +132,59 @@ function remoteTargetForSelection(remoteCollectionPath, selectedPath) {
   return `${remoteCollectionPath}/${path.basename(selectedPath)}`;
 }
 
+async function localFilesForSelection(localPaths) {
+  const localFiles = [];
+  for (const selectedPath of localPaths) {
+    const stat = await fsp.stat(selectedPath);
+    if (stat.isFile()) {
+      localFiles.push({ localPath: selectedPath, name: path.basename(selectedPath) });
+    } else if (stat.isDirectory()) {
+      await walkDirectory(selectedPath, async (filePath) => {
+        const relativePath = path.relative(selectedPath, filePath).split(path.sep).join("/");
+        localFiles.push({
+          localPath: filePath,
+          name: path.posix.join(path.basename(selectedPath), relativePath),
+        });
+      });
+    }
+  }
+  return localFiles;
+}
+
+function reportDatasetResult(uploadId, dataset) {
+  for (const skipped of dataset.skipped) {
+    sendUploadEvent(uploadId, {
+      type: "log",
+      message: `Not added to the dataset: ${skipped.irodsPath || skipped.name} (${skipped.reason})`,
+    });
+  }
+  for (const failure of dataset.failed) {
+    sendUploadEvent(uploadId, {
+      type: "log",
+      isError: true,
+      message: failure.irodsPath
+        ? `Uploaded to iRODS but not added to the dataset: ${failure.irodsPath} (${failure.reason})`
+        : `Could not be uploaded to BisQue: ${failure.name} (${failure.reason})`,
+    });
+  }
+
+  const failureNote =
+    dataset.failed.length > 0
+      ? ` ${dataset.failed.length} file${dataset.failed.length === 1 ? "" : "s"} could not be registered; see Details.`
+      : "";
+  sendUploadEvent(uploadId, {
+    type: "done",
+    percent: 100,
+    message: `Created BisQue dataset “${dataset.datasetName}” with ${dataset.imageUris.length} image${dataset.imageUris.length === 1 ? "" : "s"}.${failureNote}`,
+    datasetName: dataset.datasetName,
+    datasetUri: dataset.datasetUri,
+    datasetViewUrl: `${DEFAULT_BISQUE_URL}/client_service/view?resource=${encodeURIComponent(dataset.datasetUri)}`,
+    imageCount: dataset.imageUris.length,
+    skippedCount: dataset.skipped.length,
+    failedCount: dataset.failed.length,
+  });
+}
+
 async function remoteFilesForSelection(remoteTarget, selectedPath) {
   const stat = await fsp.stat(selectedPath);
   if (stat.isFile()) return [{ irodsPath: remoteTarget, localPath: selectedPath }];
@@ -399,19 +452,26 @@ function shouldUseBput(summary) {
   return summary.totalFiles > 50 && summary.smallFiles / summary.totalFiles >= 0.8;
 }
 
-function formatError(error) {
+function formatError(error, method) {
   const message = String(error && error.message ? error.message : error);
+  const viaIrods = method !== "bqapi";
   if (error && error.code === "IRODS_REGISTRATION_UNAVAILABLE") {
     return "The files reached iRODS, but this BisQue server is not configured to register irods:// resources. Ask the BisQue administrator to enable the iRODS blob-storage driver and read access, then retry.";
   }
   if (error && error.code === "NO_BISQUE_IMAGES") {
-    return "The files reached iRODS, but BisQue did not identify any of them as images. No dataset was created.";
+    return viaIrods
+      ? "The files reached iRODS, but BisQue did not identify any of them as images. No dataset was created."
+      : "BisQue did not identify any of the selected files as images. No dataset was created.";
   }
   if (error && error.code === "BISQUE_AUTH_FAILED") {
-    return "The files reached iRODS, but BisQue rejected the saved username or password while creating the dataset.";
+    return viaIrods
+      ? "The files reached iRODS, but BisQue rejected the saved username or password while creating the dataset."
+      : "BisQue rejected the saved username or password.";
   }
-  if (error && /^BISQUE_|^MISSING_DATASET|^UNTRUSTED_BISQUE/i.test(String(error.code || ""))) {
-    return `The files reached iRODS, but the BisQue dataset could not be created. ${message}`;
+  if (error && /^BISQUE_|^MISSING_DATASET|^UNTRUSTED_BISQUE|^NO_LOCAL_FILES/i.test(String(error.code || ""))) {
+    return viaIrods
+      ? `The files reached iRODS, but the BisQue dataset could not be created. ${message}`
+      : `The BisQue dataset could not be created. ${message}`;
   }
   if (/interactive prompt|Overwrite\?/i.test(message)) {
     return "Upload stopped because the destination already contains an item with the same name. Choose a new iRODS folder or change the existing-file option.";
@@ -583,6 +643,7 @@ function normalizeDuplicateMode(mode) {
 
 async function runUpload(uploadId, payload) {
   let configPath;
+  const method = payload.method === "bqapi" ? "bqapi" : "irods";
   try {
     const credentials = await loadCredentials();
     if (!credentials) throw new Error("Save your BisQue login before uploading.");
@@ -594,14 +655,54 @@ async function runUpload(uploadId, payload) {
       if (!fs.existsSync(selectedPath)) throw new Error(`Selected path does not exist: ${selectedPath}`);
     }
 
-    const remotePath = normalizeRemoteCollectionPath(payload.remotePath || defaultRemotePath(credentials.username));
     const datasetName = normalizeDatasetName(payload.datasetName);
     const summary = await summarizePaths(localPaths);
+    const controller = new AbortController();
+    activeUploads.set(uploadId, { cancelled: false, child: null, controller });
+
+    if (method === "bqapi") {
+      sendUploadEvent(uploadId, {
+        type: "started",
+        command: "bqapi",
+        message: `Uploading directly to BisQue for dataset “${datasetName}”`,
+        summary,
+      });
+
+      const localFiles = await localFilesForSelection(localPaths);
+      const bisque = new BisqueClient({
+        baseUrl: DEFAULT_BISQUE_URL,
+        irodsHost: IRODS.host,
+        username: credentials.username,
+        password: credentials.password,
+      });
+      const dataset = await bisque.createDatasetFromLocalFiles({
+        datasetName,
+        files: localFiles,
+        signal: controller.signal,
+        onProgress: (event) => {
+          if (event.stage === "transfer") {
+            sendUploadEvent(uploadId, {
+              type: "registering",
+              percent: Math.round(((event.index + 1) / event.total) * 95),
+              message: `Uploading ${event.name} to BisQue (${event.index + 1} of ${event.total})`,
+            });
+          } else if (event.stage === "dataset") {
+            sendUploadEvent(uploadId, {
+              type: "dataset",
+              percent: 98,
+              message: `Creating BisQue dataset “${event.datasetName}” with ${event.total} image${event.total === 1 ? "" : "s"}...`,
+            });
+          }
+        },
+      });
+      reportDatasetResult(uploadId, dataset);
+      return;
+    }
+
+    const remotePath = normalizeRemoteCollectionPath(payload.remotePath || defaultRemotePath(credentials.username));
     const command = payload.mode === "bput" || payload.mode === "put" ? payload.mode : summary.recommendedMode;
     const duplicateMode = normalizeDuplicateMode(payload.duplicateMode);
-    const controller = new AbortController();
 
-    activeUploads.set(uploadId, { cancelled: false, child: null, controller });
     sendUploadEvent(uploadId, {
       type: "started",
       command,
@@ -693,41 +794,13 @@ async function runUpload(uploadId, payload) {
       },
     });
 
-    for (const skipped of dataset.skipped) {
-      sendUploadEvent(uploadId, {
-        type: "log",
-        message: `Not added to the dataset: ${skipped.irodsPath} (${skipped.reason})`,
-      });
-    }
-    for (const failure of dataset.failed) {
-      sendUploadEvent(uploadId, {
-        type: "log",
-        isError: true,
-        message: `Uploaded to iRODS but not added to the dataset: ${failure.irodsPath} (${failure.reason})`,
-      });
-    }
-
-    const failureNote =
-      dataset.failed.length > 0
-        ? ` ${dataset.failed.length} file${dataset.failed.length === 1 ? "" : "s"} could not be registered; see Details.`
-        : "";
-    sendUploadEvent(uploadId, {
-      type: "done",
-      percent: 100,
-      message: `Created BisQue dataset “${dataset.datasetName}” with ${dataset.imageUris.length} image${dataset.imageUris.length === 1 ? "" : "s"}.${failureNote}`,
-      datasetName: dataset.datasetName,
-      datasetUri: dataset.datasetUri,
-      datasetViewUrl: `${DEFAULT_BISQUE_URL}/client_service/view?resource=${encodeURIComponent(dataset.datasetUri)}`,
-      imageCount: dataset.imageUris.length,
-      skippedCount: dataset.skipped.length,
-      failedCount: dataset.failed.length,
-    });
+    reportDatasetResult(uploadId, dataset);
   } catch (error) {
     const current = activeUploads.get(uploadId);
     const cancelled = Boolean(current && current.cancelled) || error.name === "AbortError" || /cancelled/i.test(String(error.message));
     sendUploadEvent(uploadId, {
       type: cancelled ? "cancelled" : "error",
-      message: formatError(error),
+      message: formatError(error, method),
     });
   } finally {
     activeUploads.delete(uploadId);

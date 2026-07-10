@@ -214,6 +214,74 @@ test("reports files that fail registration and still creates the dataset", async
   assert.match(result.failed[0].reason, /Error ingesting file/);
 });
 
+test("creates a dataset from local files without touching iRODS", async () => {
+  const requests = [];
+  const request = async (url, options) => {
+    requests.push({ url, options });
+    if (url.endsWith("/import/transfer")) {
+      return {
+        status: 200,
+        headers: {},
+        body: `<resource type="uploaded"><image uri="/data_service/00-local-${requests.length}" /></resource>`,
+      };
+    }
+    if (url.endsWith("/data_service/dataset")) {
+      return { status: 201, headers: {}, body: '<dataset uri="/data_service/00-local-set" />' };
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+  const client = new BisqueClient({ username: "bowen68", password: "secret", request });
+
+  const result = await client.createDatasetFromLocalFiles({
+    datasetName: "Local only",
+    files: [
+      { localPath: __filename, name: "folder/one.jpg" },
+      { localPath: require.resolve("../src/bisque-client.js"), name: "folder/two.jpg" },
+    ],
+  });
+
+  assert.equal(result.datasetUri, "https://bisque2.ece.ucsb.edu/data_service/00-local-set");
+  assert.equal(result.imageUris.length, 2);
+  assert.deepEqual(result.failed, []);
+  assert.equal(
+    requests.filter((entry) => entry.url.endsWith("/import/insert_inplace")).length,
+    0,
+  );
+  assert.equal(requests.filter((entry) => entry.url.endsWith("/import/transfer")).length, 2);
+});
+
+test("keeps going when one local file fails to upload", async () => {
+  let transfers = 0;
+  const request = async (url) => {
+    if (url.endsWith("/import/transfer")) {
+      transfers += 1;
+      if (transfers === 1) return { status: 500, headers: {}, body: "" };
+      return {
+        status: 200,
+        headers: {},
+        body: '<resource type="uploaded"><image uri="/data_service/00-ok" /></resource>',
+      };
+    }
+    if (url.endsWith("/data_service/dataset")) {
+      return { status: 201, headers: {}, body: '<dataset uri="/data_service/00-set" />' };
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+  const client = new BisqueClient({ username: "bowen68", password: "secret", request });
+
+  const result = await client.createDatasetFromLocalFiles({
+    datasetName: "Partial local",
+    files: [
+      { localPath: __filename, name: "bad.jpg" },
+      { localPath: require.resolve("../src/bisque-client.js"), name: "good.jpg" },
+    ],
+  });
+
+  assert.deepEqual(result.imageUris, ["https://bisque2.ece.ucsb.edu/data_service/00-ok"]);
+  assert.equal(result.failed.length, 1);
+  assert.equal(result.failed[0].name, "bad.jpg");
+});
+
 test("fails with a summary when no file can be registered at all", async () => {
   const request = async () => ({
     status: 200,

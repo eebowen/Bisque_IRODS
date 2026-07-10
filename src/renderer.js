@@ -9,6 +9,11 @@ const elements = {
   username: document.querySelector("#username"),
   password: document.querySelector("#password"),
   remotePath: document.querySelector("#remote-path"),
+  remotePathField: document.querySelector("#remote-path-field"),
+  uploadMethod: document.querySelector("#upload-method"),
+  methodHint: document.querySelector("#method-hint"),
+  uploadModeField: document.querySelector("#upload-mode-field"),
+  duplicateModeField: document.querySelector("#duplicate-mode-field"),
   datasetName: document.querySelector("#dataset-name"),
   authStatus: document.querySelector("#auth-status"),
   testConnection: document.querySelector("#test-connection"),
@@ -86,6 +91,8 @@ function wireEvents() {
   elements.startUpload.addEventListener("click", startUpload);
   elements.cancelUpload.addEventListener("click", cancelUpload);
   elements.datasetName.addEventListener("input", updateStartAvailability);
+  elements.uploadMethod.addEventListener("change", updateMethodVisibility);
+  updateMethodVisibility();
   elements.datasetLink.addEventListener("click", async (event) => {
     event.preventDefault();
     const url = elements.datasetLink.dataset.url;
@@ -177,6 +184,7 @@ async function startUpload() {
       localPaths: state.localPaths,
       remotePath: elements.remotePath.value,
       datasetName,
+      method: elements.uploadMethod.value,
       mode: elements.uploadMode.value,
       duplicateMode: elements.duplicateMode.value,
     });
@@ -258,6 +266,16 @@ async function clearCompletedSelection() {
   state.summary = null;
   elements.datasetName.value = "";
   renderSummary();
+}
+
+function updateMethodVisibility() {
+  const isBqapi = elements.uploadMethod.value === "bqapi";
+  elements.remotePathField.hidden = isBqapi;
+  elements.uploadModeField.hidden = isBqapi;
+  elements.duplicateModeField.hidden = isBqapi;
+  elements.methodHint.textContent = isBqapi
+    ? "Files upload straight to BisQue and become one new dataset. Nothing is stored in iRODS."
+    : "Files are archived in iRODS, then registered as one new BisQue dataset.";
 }
 
 function updateStartAvailability() {
