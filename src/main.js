@@ -151,6 +151,17 @@ async function localFilesForSelection(localPaths) {
   return localFiles;
 }
 
+function retryEventPayload(event) {
+  const subject = event.irodsPath
+    ? path.posix.basename(event.irodsPath)
+    : event.name || `dataset “${event.datasetName}”`;
+  return {
+    type: "log",
+    isError: true,
+    message: `BisQue request for ${subject} failed (${event.errorMessage}); retrying in ${Math.round(event.delayMs / 1000)}s (attempt ${event.attempt + 1} of ${event.maxAttempts}).`,
+  };
+}
+
 function reportDatasetResult(uploadId, dataset) {
   for (const skipped of dataset.skipped) {
     sendUploadEvent(uploadId, {
@@ -641,6 +652,57 @@ function normalizeDuplicateMode(mode) {
   return "skip";
 }
 
+const UPLOAD_RETRY_DELAYS_MS = [5000, 15000];
+
+function isRetryableUploadError(error) {
+  const message = String(error && error.message ? error.message : error);
+  return !/cancelled|interactive prompt|Overwrite\?|already exists|CAT_INVALID_AUTHENTICATION|AUTHENTICATION|PAM_AUTH/i.test(
+    message,
+  );
+}
+
+async function uploadItemWithRetries(
+  executable,
+  configPath,
+  command,
+  selectedPath,
+  remoteTarget,
+  uploadId,
+  duplicateMode,
+) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await spawnGocmd(
+        executable,
+        ["-c", configPath, command, "--progress", selectedPath, remoteTarget],
+        uploadId,
+        // Retries may leave a partial object from the failed attempt behind,
+        // so answer overwrite prompts with yes on every attempt after the first.
+        { overwriteResponse: attempt > 0 || duplicateMode === "overwrite" ? "yes" : undefined },
+      );
+      return;
+    } catch (error) {
+      const current = activeUploads.get(uploadId);
+      if (!current || current.cancelled) throw error;
+      if (attempt >= UPLOAD_RETRY_DELAYS_MS.length || !isRetryableUploadError(error)) throw error;
+
+      const delayMs = UPLOAD_RETRY_DELAYS_MS[attempt];
+      const summary = String(error && error.message ? error.message : error)
+        .split(/\r?\n/)[0]
+        .slice(0, 160);
+      sendUploadEvent(uploadId, {
+        type: "log",
+        isError: true,
+        message: `Upload of ${path.basename(selectedPath)} failed (${summary}); retrying in ${Math.round(delayMs / 1000)}s (attempt ${attempt + 2} of ${UPLOAD_RETRY_DELAYS_MS.length + 1}).`,
+      });
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+
+      const afterWait = activeUploads.get(uploadId);
+      if (!afterWait || afterWait.cancelled) throw new Error("Upload cancelled.");
+    }
+  }
+}
+
 async function runUpload(uploadId, payload) {
   let configPath;
   const method = payload.method === "bqapi" ? "bqapi" : "irods";
@@ -686,6 +748,8 @@ async function runUpload(uploadId, payload) {
               percent: Math.round(((event.index + 1) / event.total) * 95),
               message: `Uploading ${event.name} to BisQue (${event.index + 1} of ${event.total})`,
             });
+          } else if (event.stage === "retry") {
+            sendUploadEvent(uploadId, retryEventPayload(event));
           } else if (event.stage === "dataset") {
             sendUploadEvent(uploadId, {
               type: "dataset",
@@ -743,11 +807,14 @@ async function runUpload(uploadId, payload) {
         currentPath: selectedPath,
       });
 
-      await spawnGocmd(
+      await uploadItemWithRetries(
         executable,
-        ["-c", configPath, command, "--progress", selectedPath, remoteTarget],
+        configPath,
+        command,
+        selectedPath,
+        remoteTarget,
         uploadId,
-        { overwriteResponse: duplicateMode === "overwrite" ? "yes" : undefined },
+        duplicateMode,
       );
       uploadedRemoteFiles.push(...expectedRemoteFiles);
     }
@@ -784,6 +851,8 @@ async function runUpload(uploadId, payload) {
             type: "registering",
             message: `In-place registration failed; uploading ${path.posix.basename(event.irodsPath)} directly to BisQue (${event.index + 1} of ${event.total})`,
           });
+        } else if (event.stage === "retry") {
+          sendUploadEvent(uploadId, retryEventPayload(event));
         } else if (event.stage === "dataset") {
           sendUploadEvent(uploadId, {
             type: "dataset",

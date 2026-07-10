@@ -26,6 +26,7 @@ class BisqueClient {
     this.username = String(config.username || "").trim();
     this.password = String(config.password || "");
     this.request = config.request || requestText;
+    this.retryDelays = config.retryDelays || [5000, 15000];
 
     const parsedBaseUrl = new URL(this.baseUrl);
     if (parsedBaseUrl.protocol !== "https:" && !config.allowInsecure) {
@@ -67,10 +68,14 @@ class BisqueClient {
         irodsPath: file.irodsPath,
       });
 
+      const onRetry = retryNotifier(config, { index, total: files.length, irodsPath: file.irodsPath });
       let fileImageUris = null;
       let failureReason = "";
       try {
-        const registration = await this.registerIrodsPath(file.irodsPath, config.signal);
+        const registration = await this.withRetries(
+          () => this.registerIrodsPath(file.irodsPath, config.signal),
+          { signal: config.signal, onRetry },
+        );
         fileImageUris = registration.imageUris;
       } catch (error) {
         rethrowIfFatal(error);
@@ -85,10 +90,9 @@ class BisqueClient {
           irodsPath: file.irodsPath,
         });
         try {
-          const transfer = await this.transferLocalFile(
-            file.localPath,
-            path.posix.basename(file.irodsPath),
-            config.signal,
+          const transfer = await this.withRetries(
+            () => this.transferLocalFile(file.localPath, path.posix.basename(file.irodsPath), config.signal),
+            { signal: config.signal, onRetry },
           );
           fileImageUris = transfer.imageUris;
         } catch (error) {
@@ -147,7 +151,13 @@ class BisqueClient {
 
       let fileImageUris;
       try {
-        const transfer = await this.transferLocalFile(file.localPath, file.name, config.signal);
+        const transfer = await this.withRetries(
+          () => this.transferLocalFile(file.localPath, file.name, config.signal),
+          {
+            signal: config.signal,
+            onRetry: retryNotifier(config, { index, total: files.length, name: file.name }),
+          },
+        );
         fileImageUris = transfer.imageUris;
       } catch (error) {
         rethrowIfFatal(error);
@@ -189,7 +199,10 @@ class BisqueClient {
       total: uniqueImageUris.length,
       datasetName,
     });
-    const dataset = await this.createDataset(datasetName, uniqueImageUris, config.signal);
+    const dataset = await this.withRetries(
+      () => this.createDataset(datasetName, uniqueImageUris, config.signal),
+      { signal: config.signal, onRetry: retryNotifier(config, { datasetName }) },
+    );
 
     return {
       datasetName,
@@ -320,6 +333,34 @@ class BisqueClient {
     return { datasetUri: datasetUris[0], responseXml: response.body };
   }
 
+  async withRetries(action, options) {
+    const config = options || {};
+    const delays = this.retryDelays;
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await action();
+      } catch (error) {
+        if (
+          attempt >= delays.length ||
+          !isTransientError(error) ||
+          (config.signal && config.signal.aborted)
+        ) {
+          throw error;
+        }
+        const delayMs = delays[attempt];
+        if (config.onRetry) {
+          config.onRetry({
+            attempt: attempt + 1,
+            maxAttempts: delays.length + 1,
+            delayMs,
+            errorMessage: String(error && error.message ? error.message : error),
+          });
+        }
+        await sleep(delayMs, config.signal);
+      }
+    }
+  }
+
   authorizedRequest(target, options) {
     const requestOptions = { ...(options || {}) };
     const absoluteUrl = requestOptions.absoluteUrl;
@@ -444,6 +485,55 @@ function rethrowIfFatal(error) {
   if (error && (error.name === "AbortError" || error.code === "BISQUE_AUTH_FAILED")) {
     throw error;
   }
+}
+
+const TRANSIENT_ERROR_CODES = new Set([
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "ECONNABORTED",
+  "ETIMEDOUT",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "EPIPE",
+  "ENETDOWN",
+  "ENETUNREACH",
+  "EHOSTUNREACH",
+]);
+
+function isTransientError(error) {
+  if (!error || error.name === "AbortError") return false;
+  if (error instanceof BisqueApiError) {
+    return error.code === "BISQUE_HTTP_ERROR" && Number(error.status) >= 500;
+  }
+  if (TRANSIENT_ERROR_CODES.has(String(error.code || ""))) return true;
+  return /timed out|socket hang up/i.test(String(error.message || ""));
+}
+
+function retryNotifier(config, context) {
+  return (info) => notify(config.onProgress, { stage: "retry", ...context, ...info });
+}
+
+function sleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    const abortError = () => {
+      const error = new Error("Operation cancelled.");
+      error.name = "AbortError";
+      return error;
+    };
+    if (signal?.aborted) {
+      reject(abortError());
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(abortError());
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 function assertSuccess(response, action) {

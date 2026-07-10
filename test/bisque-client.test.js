@@ -267,7 +267,12 @@ test("keeps going when one local file fails to upload", async () => {
     }
     throw new Error(`Unexpected request: ${url}`);
   };
-  const client = new BisqueClient({ username: "bowen68", password: "secret", request });
+  const client = new BisqueClient({
+    username: "bowen68",
+    password: "secret",
+    request,
+    retryDelays: [],
+  });
 
   const result = await client.createDatasetFromLocalFiles({
     datasetName: "Partial local",
@@ -297,6 +302,73 @@ test("fails with a summary when no file can be registered at all", async () => {
     }),
     (error) => error instanceof BisqueApiError && error.code === "BISQUE_REGISTRATION_FAILED",
   );
+});
+
+test("retries transient network and server errors before succeeding", async () => {
+  let transfers = 0;
+  const request = async (url) => {
+    if (url.endsWith("/import/transfer")) {
+      transfers += 1;
+      if (transfers === 1) throw Object.assign(new Error("socket hang up"), { code: "ECONNRESET" });
+      if (transfers === 2) return { status: 503, headers: {}, body: "" };
+      return {
+        status: 200,
+        headers: {},
+        body: '<resource type="uploaded"><image uri="/data_service/00-retried" /></resource>',
+      };
+    }
+    if (url.endsWith("/data_service/dataset")) {
+      return { status: 201, headers: {}, body: '<dataset uri="/data_service/00-set" />' };
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+  const client = new BisqueClient({
+    username: "bowen68",
+    password: "secret",
+    request,
+    retryDelays: [0, 0],
+  });
+
+  const retryEvents = [];
+  const result = await client.createDatasetFromLocalFiles({
+    datasetName: "Flaky network",
+    files: [{ localPath: __filename, name: "image.jpg" }],
+    onProgress: (event) => {
+      if (event.stage === "retry") retryEvents.push(event);
+    },
+  });
+
+  assert.deepEqual(result.imageUris, ["https://bisque2.ece.ucsb.edu/data_service/00-retried"]);
+  assert.deepEqual(result.failed, []);
+  assert.equal(transfers, 3);
+  assert.equal(retryEvents.length, 2);
+  assert.equal(retryEvents[0].attempt, 1);
+  assert.equal(retryEvents[0].maxAttempts, 3);
+});
+
+test("does not retry when BisQue rejects the file itself", async () => {
+  let transfers = 0;
+  const request = async (url) => {
+    if (url.endsWith("/import/transfer")) {
+      transfers += 1;
+      return {
+        status: 200,
+        headers: {},
+        body: '<resource type="uploaded"><tag name="error" value="unsupported format"/></resource>',
+      };
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+  const client = new BisqueClient({ username: "bowen68", password: "secret", request });
+
+  await assert.rejects(
+    client.createDatasetFromLocalFiles({
+      datasetName: "Rejected",
+      files: [{ localPath: __filename, name: "image.jpg" }],
+    }),
+    (error) => error instanceof BisqueApiError && error.code === "BISQUE_REGISTRATION_FAILED",
+  );
+  assert.equal(transfers, 1);
 });
 
 test("stops immediately when BisQue rejects the credentials", async () => {
