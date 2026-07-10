@@ -1,6 +1,9 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("bisque", {
+  app: {
+    openExternal: (url) => ipcRenderer.invoke("app:openExternal", url),
+  },
   auth: {
     saveCredentials: (credentials) => ipcRenderer.invoke("auth:saveCredentials", credentials),
     getProfile: () => ipcRenderer.invoke("auth:getProfile"),

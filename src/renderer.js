@@ -9,6 +9,7 @@ const elements = {
   username: document.querySelector("#username"),
   password: document.querySelector("#password"),
   remotePath: document.querySelector("#remote-path"),
+  datasetName: document.querySelector("#dataset-name"),
   authStatus: document.querySelector("#auth-status"),
   testConnection: document.querySelector("#test-connection"),
   pickFiles: document.querySelector("#pick-files"),
@@ -25,6 +26,8 @@ const elements = {
   progressTitle: document.querySelector("#progress-title"),
   progressPercent: document.querySelector("#progress-percent"),
   progressBar: document.querySelector("#progress-bar"),
+  datasetResult: document.querySelector("#dataset-result"),
+  datasetLink: document.querySelector("#dataset-link"),
   logOutput: document.querySelector("#log-output"),
 };
 
@@ -82,6 +85,12 @@ function wireEvents() {
 
   elements.startUpload.addEventListener("click", startUpload);
   elements.cancelUpload.addEventListener("click", cancelUpload);
+  elements.datasetName.addEventListener("input", updateStartAvailability);
+  elements.datasetLink.addEventListener("click", async (event) => {
+    event.preventDefault();
+    const url = elements.datasetLink.dataset.url;
+    if (url) await window.bisque.app.openExternal(url);
+  });
 }
 
 async function saveLogin() {
@@ -113,13 +122,16 @@ async function refreshSummary() {
   }
 
   state.summary = await window.bisque.upload.summarize(state.localPaths);
+  if (!elements.datasetName.value.trim() && state.summary.entries.length > 0) {
+    elements.datasetName.value = suggestDatasetName(state.summary.entries);
+  }
   renderSummary();
 }
 
 function renderSummary() {
   elements.selectionList.innerHTML = "";
   elements.emptySelection.hidden = state.localPaths.length > 0;
-  elements.startUpload.disabled = state.localPaths.length === 0 || Boolean(state.activeUploadId);
+  updateStartAvailability();
 
   if (!state.summary) {
     elements.fileCount.textContent = "0";
@@ -149,6 +161,13 @@ function renderSummary() {
 }
 
 async function startUpload() {
+  const datasetName = elements.datasetName.value.trim();
+  if (!datasetName) {
+    appendLog("Enter a name for the new BisQue dataset.", true);
+    updateStartAvailability();
+    return;
+  }
+
   resetProgress();
   elements.startUpload.disabled = true;
   elements.cancelUpload.disabled = false;
@@ -157,6 +176,7 @@ async function startUpload() {
     const result = await window.bisque.upload.start({
       localPaths: state.localPaths,
       remotePath: elements.remotePath.value,
+      datasetName,
       mode: elements.uploadMode.value,
       duplicateMode: elements.duplicateMode.value,
     });
@@ -189,12 +209,23 @@ function handleUploadProgress(event) {
 
   if (event.type === "started") {
     elements.progressTitle.textContent = event.message;
-  } else if (event.type === "file" || event.type === "tool") {
+  } else if (
+    event.type === "file" ||
+    event.type === "tool" ||
+    event.type === "upload-complete" ||
+    event.type === "registering" ||
+    event.type === "dataset" ||
+    event.type === "cancelling"
+  ) {
     elements.progressTitle.textContent = event.message;
   } else if (event.type === "done") {
-    elements.progressTitle.textContent = "Upload complete";
+    elements.progressTitle.textContent = "Dataset created";
+    elements.datasetLink.textContent = event.datasetName || "Open in BisQue";
+    elements.datasetLink.dataset.url = event.datasetUri;
+    elements.datasetResult.hidden = false;
     setProgress(100);
     finishUpload();
+    clearCompletedSelection();
   } else if (event.type === "cancelled") {
     elements.progressTitle.textContent = "Upload cancelled";
     finishUpload();
@@ -210,14 +241,37 @@ function handleUploadProgress(event) {
 
 function finishUpload() {
   state.activeUploadId = null;
-  elements.startUpload.disabled = state.localPaths.length === 0;
   elements.cancelUpload.disabled = true;
+  updateStartAvailability();
 }
 
 function resetProgress() {
   elements.progressTitle.textContent = "Starting upload";
   setProgress(0);
   elements.logOutput.textContent = "";
+  elements.datasetResult.hidden = true;
+  elements.datasetLink.dataset.url = "";
+}
+
+async function clearCompletedSelection() {
+  state.localPaths = [];
+  state.summary = null;
+  elements.datasetName.value = "";
+  renderSummary();
+}
+
+function updateStartAvailability() {
+  elements.startUpload.disabled =
+    state.localPaths.length === 0 ||
+    !elements.datasetName.value.trim() ||
+    Boolean(state.activeUploadId);
+}
+
+function suggestDatasetName(entries) {
+  if (entries.length !== 1) return `BisQue upload ${new Date().toLocaleDateString()}`;
+  const entry = entries[0];
+  if (entry.isDirectory) return entry.name;
+  return entry.name.replace(/\.[^.]+$/, "") || entry.name;
 }
 
 function setProgress(percent) {

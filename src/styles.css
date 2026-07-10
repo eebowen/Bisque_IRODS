@@ -363,6 +363,21 @@ dd {
   background: #e8e3da;
 }
 
+.dataset-result {
+  border: 1px solid #bad8c5;
+  border-radius: 8px;
+  padding: 12px;
+  background: #f0f8f2;
+  color: var(--success);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.dataset-result a {
+  margin-left: 4px;
+  color: var(--accent-dark);
+}
+
 #progress-bar {
   width: 0;
   height: 100%;

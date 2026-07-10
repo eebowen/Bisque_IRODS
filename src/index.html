@@ -43,9 +43,19 @@
             <h2>Destination</h2>
           </div>
           <label>
-            Dataset Folder Path
+            iRODS Folder Path
             <input id="remote-path" value="/ucsb/home/" />
           </label>
+          <label>
+            New BisQue Dataset Name
+            <input
+              id="dataset-name"
+              maxlength="200"
+              placeholder="For example: July microscopy images"
+              required
+            />
+          </label>
+          <p class="status muted">One new BisQue dataset will be created after each upload.</p>
         </section>
       </section>
 
@@ -119,6 +129,10 @@
           <div class="progress-track" aria-hidden="true">
             <div id="progress-bar"></div>
           </div>
+          <p id="dataset-result" class="dataset-result" hidden>
+            Dataset created:
+            <a id="dataset-link" href="#">Open in BisQue</a>
+          </p>
           <details>
             <summary>Details</summary>
             <pre id="log-output"></pre>

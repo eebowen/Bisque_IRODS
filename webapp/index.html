@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>BisQue iRODS Uploader</title>
+    <meta name="description" content="Upload files to BisQue iRODS storage from your phone or browser." />
+    <meta name="theme-color" content="#226f68" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="icon" href="./icons/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="./icons/icon-180.png" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="BisQue Upload" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="brand">
+        <div class="brand-mark">BQ</div>
+        <div>
+          <h1>BisQue iRODS Uploader</h1>
+          <p>Upload to BisQue storage from any device</p>
+        </div>
+      </header>
+
+      <form id="login-form" class="panel stack">
+        <div class="section-title">
+          <span>1</span>
+          <h2>BisQue Login</h2>
+        </div>
+        <label>
+          Server (WebDAV)
+          <input id="server-url" inputmode="url" autocapitalize="none" autocorrect="off" spellcheck="false" required />
+        </label>
+        <label>
+          Username
+          <input id="username" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" required />
+        </label>
+        <label>
+          Password
+          <input id="password" type="password" autocomplete="current-password" required />
+        </label>
+        <label class="check">
+          <input id="remember" type="checkbox" />
+          Remember password on this device
+        </label>
+        <div class="button-row">
+          <button type="submit" class="primary" id="connect">Connect</button>
+          <button type="button" id="sign-out" hidden>Sign Out</button>
+        </div>
+        <p id="auth-status" class="status muted">Your login is sent only to the server above.</p>
+      </form>
+
+      <section class="panel stack" id="upload-section" hidden>
+        <div class="section-title">
+          <span>2</span>
+          <h2>Destination</h2>
+        </div>
+        <label>
+          Folder path on the server
+          <input id="remote-path" autocapitalize="none" autocorrect="off" spellcheck="false" />
+        </label>
+
+        <div class="section-title">
+          <span>3</span>
+          <h2>Select Data</h2>
+        </div>
+        <div id="drop-zone" class="drop-zone">
+          <p>Tap to add files, or drag them here</p>
+          <div class="button-row">
+            <button type="button" id="pick-files">Choose Files</button>
+            <button type="button" id="pick-folder" hidden>Choose Folder</button>
+          </div>
+        </div>
+        <input id="file-input" type="file" multiple hidden />
+        <input id="folder-input" type="file" webkitdirectory hidden />
+
+        <div id="empty-selection" class="empty">No files selected yet.</div>
+        <ul id="selection-list" class="selection-list"></ul>
+
+        <dl class="summary">
+          <div>
+            <dt>Files</dt>
+            <dd id="file-count">0</dd>
+          </div>
+          <div>
+            <dt>Total Size</dt>
+            <dd id="total-size">0 B</dd>
+          </div>
+          <div>
+            <dt>Existing Files</dt>
+            <dd>
+              <select id="duplicate-mode">
+                <option value="skip">Skip existing</option>
+                <option value="overwrite">Replace existing</option>
+                <option value="fail">Stop upload</option>
+              </select>
+            </dd>
+          </div>
+        </dl>
+
+        <button type="button" id="start-upload" class="primary wide" disabled>Start Upload</button>
+        <button type="button" id="cancel-upload" class="danger wide" disabled>Cancel Upload</button>
+      </section>
+
+      <section class="panel stack" id="progress-panel" hidden>
+        <div class="progress-header">
+          <div>
+            <p class="eyebrow">Upload Status</p>
+            <h2 id="progress-title">Ready</h2>
+          </div>
+          <span id="progress-percent">0%</span>
+        </div>
+        <div class="progress-track" aria-hidden="true">
+          <div id="progress-bar"></div>
+        </div>
+        <p class="status warn" id="keep-open-note" hidden>Keep this page open until the upload finishes.</p>
+        <details>
+          <summary>Details</summary>
+          <pre id="log-output"></pre>
+        </details>
+      </section>
+
+      <footer class="foot">
+        <p>Files land in iRODS. Use the desktop app when you also need automatic BisQue dataset creation or large folder transfers.</p>
+      </footer>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

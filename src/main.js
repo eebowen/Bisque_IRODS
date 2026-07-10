@@ -1,10 +1,15 @@
-const { app, BrowserWindow, dialog, ipcMain, safeStorage } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, safeStorage, shell } = require("electron");
 const { spawn } = require("child_process");
 const fs = require("fs");
 const fsp = require("fs/promises");
 const https = require("https");
 const os = require("os");
 const path = require("path");
+const {
+  BisqueClient,
+  DEFAULT_BISQUE_URL,
+  normalizeDatasetName,
+} = require("./bisque-client");
 
 const IRODS = {
   host: "brain.ece.ucsb.edu",
@@ -125,6 +130,19 @@ function normalizeRemoteCollectionPath(remotePath) {
 
 function remoteTargetForSelection(remoteCollectionPath, selectedPath) {
   return `${remoteCollectionPath}/${path.basename(selectedPath)}`;
+}
+
+async function remoteFilesForSelection(remoteTarget, selectedPath) {
+  const stat = await fsp.stat(selectedPath);
+  if (stat.isFile()) return [remoteTarget];
+  if (!stat.isDirectory()) return [];
+
+  const remoteFiles = [];
+  await walkDirectory(selectedPath, async (filePath) => {
+    const relativePath = path.relative(selectedPath, filePath).split(path.sep).join("/");
+    remoteFiles.push(path.posix.join(remoteTarget, relativePath));
+  });
+  return remoteFiles;
 }
 
 function getPlatformAssetName(version) {
@@ -380,11 +398,23 @@ function shouldUseBput(summary) {
 
 function formatError(error) {
   const message = String(error && error.message ? error.message : error);
+  if (error && error.code === "IRODS_REGISTRATION_UNAVAILABLE") {
+    return "The files reached iRODS, but this BisQue server is not configured to register irods:// resources. Ask the BisQue administrator to enable the iRODS blob-storage driver and read access, then retry.";
+  }
+  if (error && error.code === "NO_BISQUE_IMAGES") {
+    return "The files reached iRODS, but BisQue did not identify any of them as images. No dataset was created.";
+  }
+  if (error && error.code === "BISQUE_AUTH_FAILED") {
+    return "The files reached iRODS, but BisQue rejected the saved username or password while creating the dataset.";
+  }
+  if (error && /^BISQUE_|^MISSING_DATASET|^UNTRUSTED_BISQUE/i.test(String(error.code || ""))) {
+    return `The files reached iRODS, but the BisQue dataset could not be created. ${message}`;
+  }
   if (/interactive prompt|Overwrite\?/i.test(message)) {
-    return "Upload stopped because the destination already contains an item with the same name. Choose a new dataset folder or remove the existing item in BisQue/iRODS first.";
+    return "Upload stopped because the destination already contains an item with the same name. Choose a new iRODS folder or change the existing-file option.";
   }
   if (/Data object .* already exists/i.test(message)) {
-    return "That iRODS path already exists as a file, not a dataset folder. Choose a new dataset folder name and try again.";
+    return "That iRODS path already exists as a file, not a folder. Choose a new iRODS folder and try again.";
   }
   if (/CAT_INVALID_AUTHENTICATION|AUTHENTICATION|password|PAM_AUTH/i.test(message)) {
     return "BisQue login failed. Check your username and password, then try again.";
@@ -562,15 +592,17 @@ async function runUpload(uploadId, payload) {
     }
 
     const remotePath = normalizeRemoteCollectionPath(payload.remotePath || defaultRemotePath(credentials.username));
+    const datasetName = normalizeDatasetName(payload.datasetName);
     const summary = await summarizePaths(localPaths);
     const command = payload.mode === "bput" || payload.mode === "put" ? payload.mode : summary.recommendedMode;
     const duplicateMode = normalizeDuplicateMode(payload.duplicateMode);
+    const controller = new AbortController();
 
-    activeUploads.set(uploadId, { cancelled: false, child: null });
+    activeUploads.set(uploadId, { cancelled: false, child: null, controller });
     sendUploadEvent(uploadId, {
       type: "started",
       command,
-      message: `Starting ${command} upload to ${remotePath}`,
+      message: `Uploading to iRODS for dataset “${datasetName}”`,
       summary,
     });
 
@@ -578,9 +610,11 @@ async function runUpload(uploadId, payload) {
     configPath = await writeTemporaryConfig(credentials.username, credentials.password, uploadId);
     await ensureRemoteCollection(executable, configPath, remotePath, uploadId);
 
+    const uploadedRemoteFiles = [];
     for (let index = 0; index < localPaths.length; index += 1) {
       const selectedPath = localPaths[index];
       const remoteTarget = remoteTargetForSelection(remotePath, selectedPath);
+      const expectedRemoteFiles = await remoteFilesForSelection(remoteTarget, selectedPath);
       const current = activeUploads.get(uploadId);
       if (!current || current.cancelled) throw new Error("Upload cancelled.");
 
@@ -588,8 +622,9 @@ async function runUpload(uploadId, payload) {
         if (duplicateMode === "skip") {
           sendUploadEvent(uploadId, {
             type: "log",
-            message: `Skipping ${path.basename(selectedPath)} because it already exists.`,
+            message: `Using existing iRODS item ${path.basename(selectedPath)} for this dataset.`,
           });
+          uploadedRemoteFiles.push(...expectedRemoteFiles);
           continue;
         }
 
@@ -610,16 +645,65 @@ async function runUpload(uploadId, payload) {
         uploadId,
         { overwriteResponse: duplicateMode === "overwrite" ? "yes" : undefined },
       );
+      uploadedRemoteFiles.push(...expectedRemoteFiles);
+    }
+
+    const uniqueRemoteFiles = [...new Set(uploadedRemoteFiles)];
+    sendUploadEvent(uploadId, {
+      type: "upload-complete",
+      percent: 88,
+      message: `iRODS upload complete. Registering ${uniqueRemoteFiles.length} file${uniqueRemoteFiles.length === 1 ? "" : "s"} with BisQue...`,
+    });
+
+    const bisque = new BisqueClient({
+      baseUrl: DEFAULT_BISQUE_URL,
+      irodsHost: IRODS.host,
+      username: credentials.username,
+      password: credentials.password,
+    });
+    const dataset = await bisque.createDatasetFromIrodsPaths({
+      datasetName,
+      irodsPaths: uniqueRemoteFiles,
+      signal: controller.signal,
+      onProgress: (event) => {
+        if (event.stage === "register") {
+          const percent = 88 + Math.round(((event.index + 1) / event.total) * 9);
+          sendUploadEvent(uploadId, {
+            type: "registering",
+            percent,
+            message: `Registering ${path.posix.basename(event.irodsPath)} with BisQue (${event.index + 1} of ${event.total})`,
+          });
+        } else if (event.stage === "dataset") {
+          sendUploadEvent(uploadId, {
+            type: "dataset",
+            percent: 98,
+            message: `Creating BisQue dataset “${event.datasetName}” with ${event.total} image${event.total === 1 ? "" : "s"}...`,
+          });
+        }
+      },
+    });
+
+    for (const skipped of dataset.skipped) {
+      sendUploadEvent(uploadId, {
+        type: "log",
+        message: `Not added to the dataset: ${skipped.irodsPath} (${skipped.reason})`,
+      });
     }
 
     sendUploadEvent(uploadId, {
       type: "done",
       percent: 100,
-      message: "Upload complete.",
+      message: `Created BisQue dataset “${dataset.datasetName}” with ${dataset.imageUris.length} image${dataset.imageUris.length === 1 ? "" : "s"}.`,
+      datasetName: dataset.datasetName,
+      datasetUri: dataset.datasetUri,
+      imageCount: dataset.imageUris.length,
+      skippedCount: dataset.skipped.length,
     });
   } catch (error) {
+    const current = activeUploads.get(uploadId);
+    const cancelled = Boolean(current && current.cancelled) || error.name === "AbortError" || /cancelled/i.test(String(error.message));
     sendUploadEvent(uploadId, {
-      type: /cancelled/i.test(String(error.message)) ? "cancelled" : "error",
+      type: cancelled ? "cancelled" : "error",
       message: formatError(error),
     });
   } finally {
@@ -691,11 +775,22 @@ ipcMain.handle("upload:cancel", async (_event, uploadId) => {
 
   upload.cancelled = true;
   if (upload.child) upload.child.kill();
+  if (upload.controller) upload.controller.abort();
 
   sendUploadEvent(uploadId, {
-    type: "cancelled",
-    message: "Upload cancelled.",
+    type: "cancelling",
+    message: "Cancelling upload and dataset creation...",
   });
 
+  return { ok: true };
+});
+
+ipcMain.handle("app:openExternal", async (_event, target) => {
+  const parsed = new URL(String(target || ""));
+  const bisqueOrigin = new URL(DEFAULT_BISQUE_URL).origin;
+  if (parsed.protocol !== "https:" || parsed.origin !== bisqueOrigin) {
+    throw new Error("Only links to the configured BisQue server can be opened.");
+  }
+  await shell.openExternal(parsed.toString());
   return { ok: true };
 });
