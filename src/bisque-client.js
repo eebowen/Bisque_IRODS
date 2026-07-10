@@ -1,3 +1,6 @@
+const crypto = require("crypto");
+const fs = require("fs");
+const fsp = require("fs/promises");
 const http = require("http");
 const https = require("https");
 const path = require("path");
@@ -36,38 +39,86 @@ class BisqueClient {
   async createDatasetFromIrodsPaths(options) {
     const config = options || {};
     const datasetName = normalizeDatasetName(config.datasetName);
-    const irodsPaths = [...new Set((config.irodsPaths || []).map(normalizeIrodsPath))];
+    const inputs = config.files || (config.irodsPaths || []).map((irodsPath) => ({ irodsPath }));
+    const filesByPath = new Map();
+    for (const input of inputs) {
+      const irodsPath = normalizeIrodsPath(input.irodsPath);
+      if (!filesByPath.has(irodsPath)) {
+        filesByPath.set(irodsPath, { irodsPath, localPath: input.localPath });
+      }
+    }
+    const files = [...filesByPath.values()];
     const imageUris = [];
     const skipped = [];
+    const failed = [];
 
-    if (irodsPaths.length === 0) {
+    if (files.length === 0) {
       throw new BisqueApiError("No uploaded iRODS files were available for the dataset.", {
         code: "NO_IRODS_FILES",
       });
     }
 
-    for (let index = 0; index < irodsPaths.length; index += 1) {
-      const irodsPath = irodsPaths[index];
+    for (let index = 0; index < files.length; index += 1) {
+      const file = files[index];
       notify(config.onProgress, {
         stage: "register",
         index,
-        total: irodsPaths.length,
-        irodsPath,
+        total: files.length,
+        irodsPath: file.irodsPath,
       });
 
-      const registration = await this.registerIrodsPath(irodsPath, config.signal);
-      if (registration.imageUris.length === 0) {
+      let fileImageUris = null;
+      let failureReason = "";
+      try {
+        const registration = await this.registerIrodsPath(file.irodsPath, config.signal);
+        fileImageUris = registration.imageUris;
+      } catch (error) {
+        rethrowIfFatal(error);
+        failureReason = `in-place registration failed (${error.message})`;
+      }
+
+      if (fileImageUris == null && file.localPath) {
+        notify(config.onProgress, {
+          stage: "transfer",
+          index,
+          total: files.length,
+          irodsPath: file.irodsPath,
+        });
+        try {
+          const transfer = await this.transferLocalFile(
+            file.localPath,
+            path.posix.basename(file.irodsPath),
+            config.signal,
+          );
+          fileImageUris = transfer.imageUris;
+        } catch (error) {
+          rethrowIfFatal(error);
+          failureReason += `; direct upload failed (${error.message})`;
+        }
+      }
+
+      if (fileImageUris == null) {
+        failed.push({ irodsPath: file.irodsPath, reason: failureReason });
+        continue;
+      }
+      if (fileImageUris.length === 0) {
         skipped.push({
-          irodsPath,
-          reason: "BisQue registered this file, but did not identify it as an image.",
+          irodsPath: file.irodsPath,
+          reason: "BisQue accepted this file, but did not identify it as an image.",
         });
         continue;
       }
-      imageUris.push(...registration.imageUris);
+      imageUris.push(...fileImageUris);
     }
 
     const uniqueImageUris = [...new Set(imageUris)];
     if (uniqueImageUris.length === 0) {
+      if (failed.length > 0) {
+        throw new BisqueApiError(
+          `BisQue could not register any of the uploaded files. First failure: ${failed[0].irodsPath}: ${failed[0].reason}`,
+          { code: "BISQUE_REGISTRATION_FAILED" },
+        );
+      }
       throw new BisqueApiError(
         "BisQue did not identify any uploaded files as images, so no dataset was created.",
         { code: "NO_BISQUE_IMAGES" },
@@ -86,6 +137,7 @@ class BisqueClient {
       datasetUri: dataset.datasetUri,
       imageUris: uniqueImageUris,
       skipped,
+      failed,
     };
   }
 
@@ -125,7 +177,9 @@ class BisqueClient {
           absoluteUrl: true,
         });
         assertSuccess(datasetResponse, "read the registered BisQue dataset");
-        imageUris.push(...extractImageUris(datasetResponse.body, this.baseUrl));
+        imageUris.push(
+          ...extractImageUris(datasetResponse.body, this.baseUrl, { includeMemberValues: true }),
+        );
       }
     }
 
@@ -135,6 +189,39 @@ class BisqueClient {
       imageUris: [...new Set(imageUris)],
       responseXml: response.body,
     };
+  }
+
+  async transferLocalFile(localPath, fileName, signal) {
+    const stat = await fsp.stat(localPath);
+    if (!stat.isFile()) {
+      throw new BisqueApiError(`Cannot upload ${localPath} to BisQue: it is not a file.`, {
+        code: "INVALID_LOCAL_FILE",
+      });
+    }
+
+    const boundary = `----bisque-${crypto.randomBytes(12).toString("hex")}`;
+    const safeName = String(fileName || path.basename(localPath)).replace(/[\r\n"]/g, "_");
+    const head = Buffer.from(
+      `--${boundary}\r\n` +
+        `Content-Disposition: form-data; name="file"; filename="${safeName}"\r\n` +
+        "Content-Type: application/octet-stream\r\n\r\n",
+      "utf8",
+    );
+    const tail = Buffer.from(`\r\n--${boundary}--\r\n`, "utf8");
+    const response = await this.authorizedRequest("/import/transfer", {
+      method: "POST",
+      headers: {
+        Accept: "application/xml, text/xml",
+        "Content-Type": `multipart/form-data; boundary=${boundary}`,
+      },
+      bodyParts: [head, { filePath: localPath, size: stat.size }, tail],
+      signal,
+    });
+
+    assertSuccess(response, "upload the file to BisQue");
+    throwForBisqueXmlError(response.body, safeName);
+
+    return { imageUris: extractImageUris(response.body, this.baseUrl) };
   }
 
   async createDataset(datasetName, imageUris, signal) {
@@ -199,10 +286,20 @@ function requestText(url, options = {}) {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
     const transport = parsed.protocol === "https:" ? https : http;
-    const body = options.body == null ? null : Buffer.from(String(options.body), "utf8");
+    const bodyParts = options.bodyParts
+      ? options.bodyParts.slice()
+      : options.body == null
+        ? []
+        : [Buffer.from(String(options.body), "utf8")];
     const headers = { ...(options.headers || {}) };
-    if (body && !Object.keys(headers).some((name) => name.toLowerCase() === "content-length")) {
-      headers["Content-Length"] = body.length;
+    if (
+      bodyParts.length > 0 &&
+      !Object.keys(headers).some((name) => name.toLowerCase() === "content-length")
+    ) {
+      headers["Content-Length"] = bodyParts.reduce(
+        (sum, part) => sum + (Buffer.isBuffer(part) ? part.length : part.size),
+        0,
+      );
     }
 
     const request = transport.request(
@@ -254,9 +351,40 @@ function requestText(url, options = {}) {
       options.signal.addEventListener("abort", abort, { once: true });
     }
 
-    if (body) request.write(body);
-    request.end();
+    writeBodyParts(request, bodyParts).then(
+      () => request.end(),
+      (error) => request.destroy(error),
+    );
   });
+}
+
+function writeBodyParts(request, parts) {
+  return parts.reduce(
+    (chain, part) =>
+      chain.then(() => {
+        if (Buffer.isBuffer(part)) {
+          return new Promise((resolve, reject) => {
+            request.write(part, (error) => (error ? reject(error) : resolve()));
+          });
+        }
+        return new Promise((resolve, reject) => {
+          const stream = fs.createReadStream(part.filePath);
+          const stopStream = () => stream.destroy();
+          request.once("error", stopStream);
+          request.once("close", stopStream);
+          stream.on("error", reject);
+          stream.on("end", resolve);
+          stream.pipe(request, { end: false });
+        });
+      }),
+    Promise.resolve(),
+  );
+}
+
+function rethrowIfFatal(error) {
+  if (error && (error.name === "AbortError" || error.code === "BISQUE_AUTH_FAILED")) {
+    throw error;
+  }
 }
 
 function assertSuccess(response, action) {
@@ -307,15 +435,17 @@ function extractErrorMessage(xml) {
   return "";
 }
 
-function extractImageUris(xml, baseUrl) {
+function extractImageUris(xml, baseUrl, options) {
   const uris = extractResourceUris(xml, "image", baseUrl);
-  const valuePattern = /<value\b([^>]*)>([\s\S]*?)<\/value>/gi;
-  let match;
-  while ((match = valuePattern.exec(String(xml || "")))) {
-    const attributes = parseAttributes(match[1]);
-    if (String(attributes.type || "").toLowerCase() !== "object") continue;
-    const value = decodeXml(stripXmlTags(match[2])).trim();
-    if (value) uris.push(normalizeBisqueUri(value, baseUrl));
+  if (options && options.includeMemberValues) {
+    const valuePattern = /<value\b([^>]*)>([\s\S]*?)<\/value>/gi;
+    let match;
+    while ((match = valuePattern.exec(String(xml || "")))) {
+      const attributes = parseAttributes(match[1]);
+      if (String(attributes.type || "").toLowerCase() !== "object") continue;
+      const value = decodeXml(stripXmlTags(match[2])).trim();
+      if (value) uris.push(normalizeBisqueUri(value, baseUrl));
+    }
   }
   return [...new Set(uris)];
 }

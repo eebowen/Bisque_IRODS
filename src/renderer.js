@@ -221,7 +221,7 @@ function handleUploadProgress(event) {
   } else if (event.type === "done") {
     elements.progressTitle.textContent = "Dataset created";
     elements.datasetLink.textContent = event.datasetName || "Open in BisQue";
-    elements.datasetLink.dataset.url = event.datasetUri;
+    elements.datasetLink.dataset.url = event.datasetViewUrl || event.datasetUri;
     elements.datasetResult.hidden = false;
     setProgress(100);
     finishUpload();

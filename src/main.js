@@ -134,13 +134,16 @@ function remoteTargetForSelection(remoteCollectionPath, selectedPath) {
 
 async function remoteFilesForSelection(remoteTarget, selectedPath) {
   const stat = await fsp.stat(selectedPath);
-  if (stat.isFile()) return [remoteTarget];
+  if (stat.isFile()) return [{ irodsPath: remoteTarget, localPath: selectedPath }];
   if (!stat.isDirectory()) return [];
 
   const remoteFiles = [];
   await walkDirectory(selectedPath, async (filePath) => {
     const relativePath = path.relative(selectedPath, filePath).split(path.sep).join("/");
-    remoteFiles.push(path.posix.join(remoteTarget, relativePath));
+    remoteFiles.push({
+      irodsPath: path.posix.join(remoteTarget, relativePath),
+      localPath: filePath,
+    });
   });
   return remoteFiles;
 }
@@ -648,7 +651,9 @@ async function runUpload(uploadId, payload) {
       uploadedRemoteFiles.push(...expectedRemoteFiles);
     }
 
-    const uniqueRemoteFiles = [...new Set(uploadedRemoteFiles)];
+    const uniqueRemoteFiles = [
+      ...new Map(uploadedRemoteFiles.map((file) => [file.irodsPath, file])).values(),
+    ];
     sendUploadEvent(uploadId, {
       type: "upload-complete",
       percent: 88,
@@ -663,7 +668,7 @@ async function runUpload(uploadId, payload) {
     });
     const dataset = await bisque.createDatasetFromIrodsPaths({
       datasetName,
-      irodsPaths: uniqueRemoteFiles,
+      files: uniqueRemoteFiles,
       signal: controller.signal,
       onProgress: (event) => {
         if (event.stage === "register") {
@@ -672,6 +677,11 @@ async function runUpload(uploadId, payload) {
             type: "registering",
             percent,
             message: `Registering ${path.posix.basename(event.irodsPath)} with BisQue (${event.index + 1} of ${event.total})`,
+          });
+        } else if (event.stage === "transfer") {
+          sendUploadEvent(uploadId, {
+            type: "registering",
+            message: `In-place registration failed; uploading ${path.posix.basename(event.irodsPath)} directly to BisQue (${event.index + 1} of ${event.total})`,
           });
         } else if (event.stage === "dataset") {
           sendUploadEvent(uploadId, {
@@ -689,15 +699,28 @@ async function runUpload(uploadId, payload) {
         message: `Not added to the dataset: ${skipped.irodsPath} (${skipped.reason})`,
       });
     }
+    for (const failure of dataset.failed) {
+      sendUploadEvent(uploadId, {
+        type: "log",
+        isError: true,
+        message: `Uploaded to iRODS but not added to the dataset: ${failure.irodsPath} (${failure.reason})`,
+      });
+    }
 
+    const failureNote =
+      dataset.failed.length > 0
+        ? ` ${dataset.failed.length} file${dataset.failed.length === 1 ? "" : "s"} could not be registered; see Details.`
+        : "";
     sendUploadEvent(uploadId, {
       type: "done",
       percent: 100,
-      message: `Created BisQue dataset “${dataset.datasetName}” with ${dataset.imageUris.length} image${dataset.imageUris.length === 1 ? "" : "s"}.`,
+      message: `Created BisQue dataset “${dataset.datasetName}” with ${dataset.imageUris.length} image${dataset.imageUris.length === 1 ? "" : "s"}.${failureNote}`,
       datasetName: dataset.datasetName,
       datasetUri: dataset.datasetUri,
+      datasetViewUrl: `${DEFAULT_BISQUE_URL}/client_service/view?resource=${encodeURIComponent(dataset.datasetUri)}`,
       imageCount: dataset.imageUris.length,
       skippedCount: dataset.skipped.length,
+      failedCount: dataset.failed.length,
     });
   } catch (error) {
     const current = activeUploads.get(uploadId);

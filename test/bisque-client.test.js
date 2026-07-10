@@ -24,7 +24,7 @@ test("validates iRODS paths before sending them to BisQue", () => {
   );
 });
 
-test("extracts direct images and object members from BisQue XML", () => {
+test("extracts only <image> elements unless member values are requested", () => {
   const xml = `
     <resource type="uploaded">
       <image uri="/data_service/00-image-one" />
@@ -34,8 +34,14 @@ test("extracts direct images and object members from BisQue XML", () => {
     </resource>`;
   assert.deepEqual(extractImageUris(xml, "https://bisque2.ece.ucsb.edu"), [
     "https://bisque2.ece.ucsb.edu/data_service/00-image-one",
-    "https://bisque2.ece.ucsb.edu/data_service/00-image-two",
   ]);
+  assert.deepEqual(
+    extractImageUris(xml, "https://bisque2.ece.ucsb.edu", { includeMemberValues: true }),
+    [
+      "https://bisque2.ece.ucsb.edu/data_service/00-image-one",
+      "https://bisque2.ece.ucsb.edu/data_service/00-image-two",
+    ],
+  );
 });
 
 test("registers uploaded paths and creates one named BisQue dataset", async () => {
@@ -133,6 +139,114 @@ test("does not create an empty dataset when BisQue returns no images", async () 
     }),
     (error) => error instanceof BisqueApiError && error.code === "NO_BISQUE_IMAGES",
   );
+});
+
+test("falls back to a direct BisQue upload when in-place registration fails", async () => {
+  const requests = [];
+  const request = async (url, options) => {
+    requests.push({ url, options });
+    if (url.endsWith("/import/insert_inplace")) {
+      return {
+        status: 200,
+        headers: {},
+        body: '<resource type="uploaded"><tag name="error" value="Error ingesting file"/></resource>',
+      };
+    }
+    if (url.endsWith("/import/transfer")) {
+      return {
+        status: 200,
+        headers: {},
+        body: '<resource type="uploaded"><image uri="/data_service/00-direct" /></resource>',
+      };
+    }
+    if (url.endsWith("/data_service/dataset")) {
+      return { status: 201, headers: {}, body: '<dataset uri="/data_service/00-set" />' };
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+  const client = new BisqueClient({ username: "bowen68", password: "secret", request });
+
+  const result = await client.createDatasetFromIrodsPaths({
+    datasetName: "Fallback",
+    files: [{ irodsPath: "/ucsb/home/bowen68/test/image.jpg", localPath: __filename }],
+  });
+
+  assert.deepEqual(result.imageUris, ["https://bisque2.ece.ucsb.edu/data_service/00-direct"]);
+  assert.deepEqual(result.failed, []);
+
+  const transfer = requests.find((entry) => entry.url.endsWith("/import/transfer"));
+  assert.ok(transfer, "expected a direct transfer request");
+  assert.match(transfer.options.headers["Content-Type"], /^multipart\/form-data; boundary=/);
+  assert.equal(transfer.options.bodyParts[1].filePath, __filename);
+  assert.match(transfer.options.bodyParts[0].toString("utf8"), /filename="image\.jpg"/);
+});
+
+test("reports files that fail registration and still creates the dataset", async () => {
+  const request = async (url, options) => {
+    if (url.endsWith("/import/insert_inplace")) {
+      const failing = String(options.body).includes("broken");
+      return {
+        status: 200,
+        headers: {},
+        body: failing
+          ? '<resource type="uploaded"><tag name="error" value="Error ingesting file"/></resource>'
+          : '<resource type="uploaded"><image uri="/data_service/00-good" /></resource>',
+      };
+    }
+    if (url.endsWith("/data_service/dataset")) {
+      return { status: 201, headers: {}, body: '<dataset uri="/data_service/00-set" />' };
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+  const client = new BisqueClient({ username: "bowen68", password: "secret", request });
+
+  const result = await client.createDatasetFromIrodsPaths({
+    datasetName: "Partial",
+    files: [
+      { irodsPath: "/ucsb/home/bowen68/test/broken.jpg" },
+      { irodsPath: "/ucsb/home/bowen68/test/good.jpg" },
+    ],
+  });
+
+  assert.deepEqual(result.imageUris, ["https://bisque2.ece.ucsb.edu/data_service/00-good"]);
+  assert.equal(result.failed.length, 1);
+  assert.equal(result.failed[0].irodsPath, "/ucsb/home/bowen68/test/broken.jpg");
+  assert.match(result.failed[0].reason, /Error ingesting file/);
+});
+
+test("fails with a summary when no file can be registered at all", async () => {
+  const request = async () => ({
+    status: 200,
+    headers: {},
+    body: '<resource type="uploaded"><tag name="error" value="Error ingesting file"/></resource>',
+  });
+  const client = new BisqueClient({ username: "bowen68", password: "secret", request });
+
+  await assert.rejects(
+    client.createDatasetFromIrodsPaths({
+      datasetName: "Nothing",
+      irodsPaths: ["/ucsb/home/bowen68/test/image.jpg"],
+    }),
+    (error) => error instanceof BisqueApiError && error.code === "BISQUE_REGISTRATION_FAILED",
+  );
+});
+
+test("stops immediately when BisQue rejects the credentials", async () => {
+  let calls = 0;
+  const request = async () => {
+    calls += 1;
+    return { status: 401, headers: {}, body: "" };
+  };
+  const client = new BisqueClient({ username: "bowen68", password: "wrong", request });
+
+  await assert.rejects(
+    client.createDatasetFromIrodsPaths({
+      datasetName: "Auth",
+      irodsPaths: ["/ucsb/home/bowen68/a.jpg", "/ucsb/home/bowen68/b.jpg"],
+    }),
+    (error) => error instanceof BisqueApiError && error.code === "BISQUE_AUTH_FAILED",
+  );
+  assert.equal(calls, 1);
 });
 
 test("surfaces an unsupported iRODS registration error", async () => {
