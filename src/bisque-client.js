@@ -49,7 +49,7 @@ class BisqueClient {
       }
     }
     const files = [...filesByPath.values()];
-    const imageUris = [];
+    const resourceUris = [];
     const skipped = [];
     const failed = [];
 
@@ -69,20 +69,20 @@ class BisqueClient {
       });
 
       const onRetry = retryNotifier(config, { index, total: files.length, irodsPath: file.irodsPath });
-      let fileImageUris = null;
+      let fileResourceUris = null;
       let failureReason = "";
       try {
         const registration = await this.withRetries(
           () => this.registerIrodsPath(file.irodsPath, config.signal),
           { signal: config.signal, onRetry },
         );
-        fileImageUris = registration.imageUris;
+        fileResourceUris = registration.resourceUris;
       } catch (error) {
         rethrowIfFatal(error);
         failureReason = `in-place registration failed (${error.message})`;
       }
 
-      if (fileImageUris == null && file.localPath) {
+      if (fileResourceUris == null && file.localPath) {
         notify(config.onProgress, {
           stage: "transfer",
           index,
@@ -94,28 +94,28 @@ class BisqueClient {
             () => this.transferLocalFile(file.localPath, path.posix.basename(file.irodsPath), config.signal),
             { signal: config.signal, onRetry },
           );
-          fileImageUris = transfer.imageUris;
+          fileResourceUris = transfer.resourceUris;
         } catch (error) {
           rethrowIfFatal(error);
           failureReason += `; direct upload failed (${error.message})`;
         }
       }
 
-      if (fileImageUris == null) {
+      if (fileResourceUris == null) {
         failed.push({ irodsPath: file.irodsPath, reason: failureReason });
         continue;
       }
-      if (fileImageUris.length === 0) {
+      if (fileResourceUris.length === 0) {
         skipped.push({
           irodsPath: file.irodsPath,
-          reason: "BisQue accepted this file, but did not identify it as an image.",
+          reason: "BisQue accepted this file, but did not return a registered resource for it.",
         });
         continue;
       }
-      imageUris.push(...fileImageUris);
+      resourceUris.push(...fileResourceUris);
     }
 
-    return this.finalizeDataset(datasetName, imageUris, skipped, failed, config);
+    return this.finalizeDataset(datasetName, resourceUris, skipped, failed, config);
   }
 
   async createDatasetFromLocalFiles(options) {
@@ -129,7 +129,7 @@ class BisqueClient {
       }
     }
     const files = [...filesByPath.values()];
-    const imageUris = [];
+    const resourceUris = [];
     const skipped = [];
     const failed = [];
 
@@ -149,7 +149,7 @@ class BisqueClient {
         localPath: file.localPath,
       });
 
-      let fileImageUris;
+      let fileResourceUris;
       try {
         const transfer = await this.withRetries(
           () => this.transferLocalFile(file.localPath, file.name, config.signal),
@@ -158,30 +158,30 @@ class BisqueClient {
             onRetry: retryNotifier(config, { index, total: files.length, name: file.name }),
           },
         );
-        fileImageUris = transfer.imageUris;
+        fileResourceUris = transfer.resourceUris;
       } catch (error) {
         rethrowIfFatal(error);
         failed.push({ name: file.name, localPath: file.localPath, reason: error.message });
         continue;
       }
 
-      if (fileImageUris.length === 0) {
+      if (fileResourceUris.length === 0) {
         skipped.push({
           name: file.name,
           localPath: file.localPath,
-          reason: "BisQue accepted this file, but did not identify it as an image.",
+          reason: "BisQue accepted this file, but did not return a registered resource for it.",
         });
         continue;
       }
-      imageUris.push(...fileImageUris);
+      resourceUris.push(...fileResourceUris);
     }
 
-    return this.finalizeDataset(datasetName, imageUris, skipped, failed, config);
+    return this.finalizeDataset(datasetName, resourceUris, skipped, failed, config);
   }
 
-  async finalizeDataset(datasetName, imageUris, skipped, failed, config) {
-    const uniqueImageUris = [...new Set(imageUris)];
-    if (uniqueImageUris.length === 0) {
+  async finalizeDataset(datasetName, resourceUris, skipped, failed, config) {
+    const uniqueResourceUris = [...new Set(resourceUris)];
+    if (uniqueResourceUris.length === 0) {
       if (failed.length > 0) {
         throw new BisqueApiError(
           `BisQue could not register any of the uploaded files. First failure: ${failed[0].irodsPath || failed[0].name}: ${failed[0].reason}`,
@@ -189,27 +189,101 @@ class BisqueClient {
         );
       }
       throw new BisqueApiError(
-        "BisQue did not identify any uploaded files as images, so no dataset was created.",
-        { code: "NO_BISQUE_IMAGES" },
+        "BisQue did not return a registered resource for any uploaded file, so no dataset was created.",
+        { code: "NO_BISQUE_RESOURCES" },
       );
     }
 
     notify(config.onProgress, {
       stage: "dataset",
-      total: uniqueImageUris.length,
+      total: uniqueResourceUris.length,
       datasetName,
     });
-    const dataset = await this.withRetries(
-      () => this.createDataset(datasetName, uniqueImageUris, config.signal),
-      { signal: config.signal, onRetry: retryNotifier(config, { datasetName }) },
+    const onRetry = retryNotifier(config, { datasetName });
+    const existingDatasetUri = await this.withRetries(
+      () => this.findDatasetByName(datasetName, config.signal),
+      { signal: config.signal, onRetry },
     );
+    const dataset = existingDatasetUri
+      ? await this.withRetries(
+          () => this.appendToDataset(existingDatasetUri, uniqueResourceUris, config.signal),
+          { signal: config.signal, onRetry },
+        )
+      : await this.withRetries(
+          () => this.createDataset(datasetName, uniqueResourceUris, config.signal),
+          { signal: config.signal, onRetry },
+        );
 
     return {
       datasetName,
       datasetUri: dataset.datasetUri,
-      imageUris: uniqueImageUris,
+      resourceUris: uniqueResourceUris,
+      appendedToExisting: Boolean(existingDatasetUri),
+      addedCount: dataset.addedCount,
+      memberCount: dataset.memberCount,
       skipped,
       failed,
+    };
+  }
+
+  async findDatasetByName(datasetName, signal) {
+    const cleanName = normalizeDatasetName(datasetName);
+    const response = await this.authorizedRequest(
+      `/data_service/dataset?name=${encodeURIComponent(cleanName)}`,
+      { method: "GET", headers: { Accept: "application/xml, text/xml" }, signal },
+    );
+    assertSuccess(response, "look up the BisQue dataset name");
+
+    // The query matches server-side, but only trust datasets whose name is an
+    // exact match; take the first one when duplicates exist.
+    for (const tag of extractStartTags(response.body, "dataset")) {
+      const attributes = parseAttributes(tag);
+      if (attributes.name !== cleanName) continue;
+      if (attributes.uri) return normalizeBisqueUri(attributes.uri, this.baseUrl);
+      if (attributes.resource_uniq) {
+        return normalizeBisqueUri(`/data_service/${attributes.resource_uniq}`, this.baseUrl);
+      }
+    }
+    return null;
+  }
+
+  async appendToDataset(datasetUri, resourceUris, signal) {
+    const separator = datasetUri.includes("?") ? "&" : "?";
+    const response = await this.authorizedRequest(`${datasetUri}${separator}view=full`, {
+      method: "GET",
+      headers: { Accept: "application/xml, text/xml" },
+      signal,
+      absoluteUrl: true,
+    });
+    assertSuccess(response, "read the existing BisQue dataset");
+
+    const existingMembers = new Set(extractMemberValues(response.body, this.baseUrl));
+    const newMembers = [...new Set(resourceUris.map((uri) => normalizeBisqueUri(uri, this.baseUrl)))]
+      .filter((uri) => !existingMembers.has(uri));
+    if (newMembers.length === 0) {
+      return { datasetUri, addedCount: 0, memberCount: existingMembers.size };
+    }
+
+    const values = newMembers
+      .map((uri) => `<value type="object">${escapeXml(uri)}</value>`)
+      .join("");
+    const updateResponse = await this.authorizedRequest(datasetUri, {
+      method: "PUT",
+      headers: {
+        Accept: "application/xml, text/xml",
+        "Content-Type": "text/xml; charset=utf-8",
+      },
+      body: appendValuesToDatasetXml(response.body, values),
+      signal,
+      absoluteUrl: true,
+    });
+    assertSuccess(updateResponse, "add files to the existing BisQue dataset");
+    throwForBisqueXmlError(updateResponse.body, "the existing BisQue dataset");
+
+    return {
+      datasetUri,
+      addedCount: newMembers.length,
+      memberCount: existingMembers.size + newMembers.length,
     };
   }
 
@@ -237,9 +311,9 @@ class BisqueClient {
     assertSuccess(response, "register the iRODS file");
     throwForBisqueXmlError(response.body, normalizedPath);
 
-    let imageUris = extractImageUris(response.body, this.baseUrl);
+    const resourceUris = extractUploadedResourceUris(response.body, this.baseUrl);
     const datasetUris = extractResourceUris(response.body, "dataset", this.baseUrl);
-    if (imageUris.length === 0 && datasetUris.length > 0) {
+    if (resourceUris.length === 0 && datasetUris.length > 0) {
       for (const datasetUri of datasetUris) {
         const separator = datasetUri.includes("?") ? "&" : "?";
         const datasetResponse = await this.authorizedRequest(`${datasetUri}${separator}view=deep`, {
@@ -249,8 +323,10 @@ class BisqueClient {
           absoluteUrl: true,
         });
         assertSuccess(datasetResponse, "read the registered BisQue dataset");
-        imageUris.push(
-          ...extractImageUris(datasetResponse.body, this.baseUrl, { includeMemberValues: true }),
+        resourceUris.push(
+          ...extractUploadedResourceUris(datasetResponse.body, this.baseUrl, {
+            includeMemberValues: true,
+          }),
         );
       }
     }
@@ -258,7 +334,7 @@ class BisqueClient {
     return {
       irodsPath: normalizedPath,
       irodsUrl,
-      imageUris: [...new Set(imageUris)],
+      resourceUris: [...new Set(resourceUris)],
       responseXml: response.body,
     };
   }
@@ -293,14 +369,14 @@ class BisqueClient {
     assertSuccess(response, "upload the file to BisQue");
     throwForBisqueXmlError(response.body, safeName);
 
-    return { imageUris: extractImageUris(response.body, this.baseUrl) };
+    return { resourceUris: extractUploadedResourceUris(response.body, this.baseUrl) };
   }
 
-  async createDataset(datasetName, imageUris, signal) {
+  async createDataset(datasetName, resourceUris, signal) {
     const cleanName = normalizeDatasetName(datasetName);
-    const members = [...new Set(imageUris.map((uri) => normalizeBisqueUri(uri, this.baseUrl)))];
+    const members = [...new Set(resourceUris.map((uri) => normalizeBisqueUri(uri, this.baseUrl)))];
     if (members.length === 0) {
-      throw new BisqueApiError("A BisQue dataset needs at least one image.", {
+      throw new BisqueApiError("A BisQue dataset needs at least one file.", {
         code: "EMPTY_DATASET",
       });
     }
@@ -330,7 +406,12 @@ class BisqueClient {
       );
     }
 
-    return { datasetUri: datasetUris[0], responseXml: response.body };
+    return {
+      datasetUri: datasetUris[0],
+      addedCount: members.length,
+      memberCount: members.length,
+      responseXml: response.body,
+    };
   }
 
   async withRetries(action, options) {
@@ -584,19 +665,51 @@ function extractErrorMessage(xml) {
   return "";
 }
 
-function extractImageUris(xml, baseUrl, options) {
-  const uris = extractResourceUris(xml, "image", baseUrl);
+// Resource elements the BisQue import service can return for a single uploaded
+// file. Non-image files (PDF, CSV, ...) come back as <file> or a generic
+// <resource>; datasets can reference any of them as members.
+const UPLOADED_RESOURCE_TAGS = ["image", "file", "table", "resource"];
+
+function extractUploadedResourceUris(xml, baseUrl, options) {
+  const uris = [];
+  for (const tagName of UPLOADED_RESOURCE_TAGS) {
+    uris.push(...extractResourceUris(xml, tagName, baseUrl));
+  }
   if (options && options.includeMemberValues) {
-    const valuePattern = /<value\b([^>]*)>([\s\S]*?)<\/value>/gi;
-    let match;
-    while ((match = valuePattern.exec(String(xml || "")))) {
-      const attributes = parseAttributes(match[1]);
-      if (String(attributes.type || "").toLowerCase() !== "object") continue;
-      const value = decodeXml(stripXmlTags(match[2])).trim();
-      if (value) uris.push(normalizeBisqueUri(value, baseUrl));
-    }
+    uris.push(...extractMemberValues(xml, baseUrl));
   }
   return [...new Set(uris)];
+}
+
+function extractMemberValues(xml, baseUrl) {
+  const uris = [];
+  const valuePattern = /<value\b([^>]*)>([\s\S]*?)<\/value>/gi;
+  let match;
+  while ((match = valuePattern.exec(String(xml || "")))) {
+    const attributes = parseAttributes(match[1]);
+    if (String(attributes.type || "").toLowerCase() !== "object") continue;
+    const value = decodeXml(stripXmlTags(match[2])).trim();
+    if (value) uris.push(normalizeBisqueUri(value, baseUrl));
+  }
+  return uris;
+}
+
+// Inserts new <value> members into a fetched dataset document, keeping the
+// rest of the document (tags, existing members) untouched for the PUT update.
+function appendValuesToDatasetXml(datasetXml, valuesXml) {
+  const xml = String(datasetXml || "");
+  const closeIndex = xml.lastIndexOf("</dataset>");
+  if (closeIndex !== -1) {
+    return xml.slice(0, closeIndex) + valuesXml + xml.slice(closeIndex);
+  }
+  const selfClosing = xml.match(/<dataset\b[^>]*\/>/i);
+  if (selfClosing) {
+    const opened = selfClosing[0].replace(/\s*\/>$/, ">");
+    return xml.replace(selfClosing[0], `${opened}${valuesXml}</dataset>`);
+  }
+  throw new BisqueApiError("BisQue returned an unexpected dataset document.", {
+    code: "INVALID_DATASET_DOCUMENT",
+  });
 }
 
 function extractResourceUris(xml, tagName, baseUrl) {
@@ -702,7 +815,7 @@ module.exports = {
   DEFAULT_BISQUE_URL,
   decodeXml,
   escapeXml,
-  extractImageUris,
+  extractUploadedResourceUris,
   extractResourceUris,
   normalizeDatasetName,
   normalizeIrodsPath,

@@ -183,14 +183,25 @@ function reportDatasetResult(uploadId, dataset) {
     dataset.failed.length > 0
       ? ` ${dataset.failed.length} file${dataset.failed.length === 1 ? "" : "s"} could not be registered; see Details.`
       : "";
+  let summary;
+  if (!dataset.appendedToExisting) {
+    summary = `Created BisQue dataset “${dataset.datasetName}” with ${dataset.resourceUris.length} file${dataset.resourceUris.length === 1 ? "" : "s"}.`;
+  } else if (dataset.addedCount === 0) {
+    summary = `BisQue dataset “${dataset.datasetName}” already contained ${dataset.resourceUris.length === 1 ? "this file" : "all of these files"}; nothing new was added.`;
+  } else {
+    summary = `Added ${dataset.addedCount} file${dataset.addedCount === 1 ? "" : "s"} to existing BisQue dataset “${dataset.datasetName}” (${dataset.memberCount} total).`;
+  }
   sendUploadEvent(uploadId, {
     type: "done",
     percent: 100,
-    message: `Created BisQue dataset “${dataset.datasetName}” with ${dataset.imageUris.length} image${dataset.imageUris.length === 1 ? "" : "s"}.${failureNote}`,
+    message: `${summary}${failureNote}`,
     datasetName: dataset.datasetName,
     datasetUri: dataset.datasetUri,
     datasetViewUrl: `${DEFAULT_BISQUE_URL}/client_service/view?resource=${encodeURIComponent(dataset.datasetUri)}`,
-    imageCount: dataset.imageUris.length,
+    fileCount: dataset.resourceUris.length,
+    addedCount: dataset.addedCount,
+    memberCount: dataset.memberCount,
+    appendedToExisting: dataset.appendedToExisting,
     skippedCount: dataset.skipped.length,
     failedCount: dataset.failed.length,
   });
@@ -469,10 +480,10 @@ function formatError(error, method) {
   if (error && error.code === "IRODS_REGISTRATION_UNAVAILABLE") {
     return "The files reached iRODS, but this BisQue server is not configured to register irods:// resources. Ask the BisQue administrator to enable the iRODS blob-storage driver and read access, then retry.";
   }
-  if (error && error.code === "NO_BISQUE_IMAGES") {
+  if (error && error.code === "NO_BISQUE_RESOURCES") {
     return viaIrods
-      ? "The files reached iRODS, but BisQue did not identify any of them as images. No dataset was created."
-      : "BisQue did not identify any of the selected files as images. No dataset was created.";
+      ? "The files reached iRODS, but BisQue did not register any of them. No dataset was created."
+      : "BisQue did not register any of the selected files. No dataset was created.";
   }
   if (error && error.code === "BISQUE_AUTH_FAILED") {
     return viaIrods
@@ -754,7 +765,7 @@ async function runUpload(uploadId, payload) {
             sendUploadEvent(uploadId, {
               type: "dataset",
               percent: 98,
-              message: `Creating BisQue dataset “${event.datasetName}” with ${event.total} image${event.total === 1 ? "" : "s"}...`,
+              message: `Adding ${event.total} file${event.total === 1 ? "" : "s"} to BisQue dataset “${event.datasetName}”...`,
             });
           }
         },
@@ -857,7 +868,7 @@ async function runUpload(uploadId, payload) {
           sendUploadEvent(uploadId, {
             type: "dataset",
             percent: 98,
-            message: `Creating BisQue dataset “${event.datasetName}” with ${event.total} image${event.total === 1 ? "" : "s"}...`,
+            message: `Adding ${event.total} file${event.total === 1 ? "" : "s"} to BisQue dataset “${event.datasetName}”...`,
           });
         }
       },

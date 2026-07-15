@@ -5,7 +5,7 @@ const {
   BisqueApiError,
   BisqueClient,
   escapeXml,
-  extractImageUris,
+  extractUploadedResourceUris,
   normalizeIrodsPath,
 } = require("../src/bisque-client");
 
@@ -24,21 +24,24 @@ test("validates iRODS paths before sending them to BisQue", () => {
   );
 });
 
-test("extracts only <image> elements unless member values are requested", () => {
+test("extracts image and non-image resources, adding member values on request", () => {
   const xml = `
     <resource type="uploaded">
       <image uri="/data_service/00-image-one" />
+      <file uri="/data_service/00-file-one" />
       <dataset>
         <value type="object">https://bisque2.ece.ucsb.edu/data_service/00-image-two</value>
       </dataset>
     </resource>`;
-  assert.deepEqual(extractImageUris(xml, "https://bisque2.ece.ucsb.edu"), [
+  assert.deepEqual(extractUploadedResourceUris(xml, "https://bisque2.ece.ucsb.edu"), [
     "https://bisque2.ece.ucsb.edu/data_service/00-image-one",
+    "https://bisque2.ece.ucsb.edu/data_service/00-file-one",
   ]);
   assert.deepEqual(
-    extractImageUris(xml, "https://bisque2.ece.ucsb.edu", { includeMemberValues: true }),
+    extractUploadedResourceUris(xml, "https://bisque2.ece.ucsb.edu", { includeMemberValues: true }),
     [
       "https://bisque2.ece.ucsb.edu/data_service/00-image-one",
+      "https://bisque2.ece.ucsb.edu/data_service/00-file-one",
       "https://bisque2.ece.ucsb.edu/data_service/00-image-two",
     ],
   );
@@ -54,6 +57,9 @@ test("registers uploaded paths and creates one named BisQue dataset", async () =
         headers: {},
         body: '<resource type="uploaded"><image uri="/data_service/00-image" /></resource>',
       };
+    }
+    if (url.includes("/data_service/dataset?name=")) {
+      return { status: 200, headers: {}, body: "<resource />" };
     }
     if (url.endsWith("/data_service/dataset")) {
       return {
@@ -72,8 +78,9 @@ test("registers uploaded paths and creates one named BisQue dataset", async () =
   });
 
   assert.equal(result.datasetUri, "https://bisque2.ece.ucsb.edu/data_service/00-dataset");
-  assert.deepEqual(result.imageUris, ["https://bisque2.ece.ucsb.edu/data_service/00-image"]);
-  assert.equal(requests.length, 2);
+  assert.deepEqual(result.resourceUris, ["https://bisque2.ece.ucsb.edu/data_service/00-image"]);
+  assert.equal(result.appendedToExisting, false);
+  assert.equal(requests.length, 3);
 
   const registrationForm = new URLSearchParams(requests[0].options.body);
   assert.match(
@@ -82,8 +89,9 @@ test("registers uploaded paths and creates one named BisQue dataset", async () =
   );
   assert.match(requests[0].options.headers.Authorization, /^Basic /);
   assert.equal(requests[0].options.body.includes("secret"), false);
+  assert.match(requests[1].url, /\/data_service\/dataset\?name=A%20%26%20B$/);
   assert.equal(
-    requests[1].options.body,
+    requests[2].options.body,
     '<dataset name="A &amp; B"><value type="object">https://bisque2.ece.ucsb.edu/data_service/00-image</value></dataset>',
   );
 });
@@ -106,6 +114,9 @@ test("expands a BisQue dataset returned while registering a multi-image file", a
           '<value type="object">/data_service/00-b</value></dataset>',
       };
     }
+    if (url.includes("/data_service/dataset?name=")) {
+      return { status: 200, headers: {}, body: "<resource />" };
+    }
     if (url.endsWith("/data_service/dataset")) {
       return { status: 201, headers: {}, body: '<dataset uri="/data_service/00-final" />' };
     }
@@ -118,26 +129,168 @@ test("expands a BisQue dataset returned while registering a multi-image file", a
     irodsPaths: ["/ucsb/home/bowen68/test/series.zip"],
   });
 
-  assert.deepEqual(result.imageUris, [
+  assert.deepEqual(result.resourceUris, [
     "https://bisque2.ece.ucsb.edu/data_service/00-a",
     "https://bisque2.ece.ucsb.edu/data_service/00-b",
   ]);
 });
 
-test("does not create an empty dataset when BisQue returns no images", async () => {
+test("adds non-image files such as PDFs to the dataset", async () => {
+  const requests = [];
+  const request = async (url, options) => {
+    requests.push({ url, options });
+    if (url.endsWith("/import/insert_inplace")) {
+      return {
+        status: 200,
+        headers: {},
+        body: '<resource type="uploaded"><file uri="/data_service/00-file" /></resource>',
+      };
+    }
+    if (url.includes("/data_service/dataset?name=")) {
+      return { status: 200, headers: {}, body: "<resource />" };
+    }
+    if (url.endsWith("/data_service/dataset")) {
+      return { status: 201, headers: {}, body: '<dataset uri="/data_service/00-docs" />' };
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+  const client = new BisqueClient({ username: "bowen68", password: "secret", request });
+
+  const result = await client.createDatasetFromIrodsPaths({
+    datasetName: "Documents",
+    irodsPaths: ["/ucsb/home/bowen68/test/wan2.1.pdf"],
+  });
+
+  assert.deepEqual(result.resourceUris, ["https://bisque2.ece.ucsb.edu/data_service/00-file"]);
+  assert.deepEqual(result.skipped, []);
+  const datasetRequest = requests.find((entry) => entry.url.endsWith("/data_service/dataset"));
+  assert.match(
+    datasetRequest.options.body,
+    /<value type="object">https:\/\/bisque2\.ece\.ucsb\.edu\/data_service\/00-file<\/value>/,
+  );
+});
+
+test("adds new files to an existing BisQue dataset with the same name", async () => {
+  const requests = [];
+  const request = async (url, options) => {
+    requests.push({ url, options });
+    if (url.endsWith("/import/insert_inplace")) {
+      return {
+        status: 200,
+        headers: {},
+        body: '<resource type="uploaded"><image uri="/data_service/00-new" /></resource>',
+      };
+    }
+    if (url.includes("/data_service/dataset?name=")) {
+      return {
+        status: 200,
+        headers: {},
+        body: '<resource><dataset name="July scans" uri="/data_service/00-existing" /></resource>',
+      };
+    }
+    if (url.includes("/data_service/00-existing?view=full")) {
+      return {
+        status: 200,
+        headers: {},
+        body:
+          '<dataset name="July scans" uri="/data_service/00-existing">' +
+          '<tag name="note" value="keep me" />' +
+          '<value index="0" type="object">https://bisque2.ece.ucsb.edu/data_service/00-old</value>' +
+          "</dataset>",
+      };
+    }
+    if (url.endsWith("/data_service/00-existing")) {
+      return { status: 200, headers: {}, body: '<dataset uri="/data_service/00-existing" />' };
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+  const client = new BisqueClient({ username: "bowen68", password: "secret", request });
+
+  const result = await client.createDatasetFromIrodsPaths({
+    datasetName: "July scans",
+    irodsPaths: ["/ucsb/home/bowen68/test/new.jpg"],
+  });
+
+  assert.equal(result.datasetUri, "https://bisque2.ece.ucsb.edu/data_service/00-existing");
+  assert.equal(result.appendedToExisting, true);
+  assert.equal(result.addedCount, 1);
+  assert.equal(result.memberCount, 2);
+
+  const update = requests.find((entry) => entry.options.method === "PUT");
+  assert.ok(update, "expected a PUT update of the existing dataset");
+  assert.equal(update.url, "https://bisque2.ece.ucsb.edu/data_service/00-existing");
+  assert.match(update.options.body, /00-old/);
+  assert.match(update.options.body, /keep me/);
+  assert.match(
+    update.options.body,
+    /<value type="object">https:\/\/bisque2\.ece\.ucsb\.edu\/data_service\/00-new<\/value><\/dataset>/,
+  );
+  const creations = requests.filter(
+    (entry) => entry.url.endsWith("/data_service/dataset") && entry.options.method === "POST",
+  );
+  assert.equal(creations.length, 0, "must not create a duplicate dataset");
+});
+
+test("does not duplicate members that are already in the dataset", async () => {
+  const requests = [];
+  const request = async (url, options) => {
+    requests.push({ url, options });
+    if (url.endsWith("/import/insert_inplace")) {
+      return {
+        status: 200,
+        headers: {},
+        body: '<resource type="uploaded"><image uri="/data_service/00-old" /></resource>',
+      };
+    }
+    if (url.includes("/data_service/dataset?name=")) {
+      return {
+        status: 200,
+        headers: {},
+        body: '<resource><dataset name="July scans" uri="/data_service/00-existing" /></resource>',
+      };
+    }
+    if (url.includes("/data_service/00-existing?view=full")) {
+      return {
+        status: 200,
+        headers: {},
+        body:
+          '<dataset name="July scans" uri="/data_service/00-existing">' +
+          '<value index="0" type="object">https://bisque2.ece.ucsb.edu/data_service/00-old</value>' +
+          "</dataset>",
+      };
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+  const client = new BisqueClient({ username: "bowen68", password: "secret", request });
+
+  const result = await client.createDatasetFromIrodsPaths({
+    datasetName: "July scans",
+    irodsPaths: ["/ucsb/home/bowen68/test/old.jpg"],
+  });
+
+  assert.equal(result.appendedToExisting, true);
+  assert.equal(result.addedCount, 0);
+  assert.equal(result.memberCount, 1);
+  assert.ok(
+    requests.every((entry) => entry.options.method !== "PUT"),
+    "must not rewrite the dataset when nothing new was added",
+  );
+});
+
+test("does not create an empty dataset when BisQue returns no resources", async () => {
   const request = async () => ({
     status: 200,
     headers: {},
-    body: '<resource type="uploaded"><file uri="/data_service/00-file" /></resource>',
+    body: '<resource type="uploaded" />',
   });
   const client = new BisqueClient({ username: "bowen68", password: "secret", request });
 
   await assert.rejects(
     client.createDatasetFromIrodsPaths({
-      datasetName: "Not images",
+      datasetName: "Nothing registered",
       irodsPaths: ["/ucsb/home/bowen68/test/notes.txt"],
     }),
-    (error) => error instanceof BisqueApiError && error.code === "NO_BISQUE_IMAGES",
+    (error) => error instanceof BisqueApiError && error.code === "NO_BISQUE_RESOURCES",
   );
 });
 
@@ -159,6 +312,9 @@ test("falls back to a direct BisQue upload when in-place registration fails", as
         body: '<resource type="uploaded"><image uri="/data_service/00-direct" /></resource>',
       };
     }
+    if (url.includes("/data_service/dataset?name=")) {
+      return { status: 200, headers: {}, body: "<resource />" };
+    }
     if (url.endsWith("/data_service/dataset")) {
       return { status: 201, headers: {}, body: '<dataset uri="/data_service/00-set" />' };
     }
@@ -171,7 +327,7 @@ test("falls back to a direct BisQue upload when in-place registration fails", as
     files: [{ irodsPath: "/ucsb/home/bowen68/test/image.jpg", localPath: __filename }],
   });
 
-  assert.deepEqual(result.imageUris, ["https://bisque2.ece.ucsb.edu/data_service/00-direct"]);
+  assert.deepEqual(result.resourceUris, ["https://bisque2.ece.ucsb.edu/data_service/00-direct"]);
   assert.deepEqual(result.failed, []);
 
   const transfer = requests.find((entry) => entry.url.endsWith("/import/transfer"));
@@ -193,6 +349,9 @@ test("reports files that fail registration and still creates the dataset", async
           : '<resource type="uploaded"><image uri="/data_service/00-good" /></resource>',
       };
     }
+    if (url.includes("/data_service/dataset?name=")) {
+      return { status: 200, headers: {}, body: "<resource />" };
+    }
     if (url.endsWith("/data_service/dataset")) {
       return { status: 201, headers: {}, body: '<dataset uri="/data_service/00-set" />' };
     }
@@ -208,7 +367,7 @@ test("reports files that fail registration and still creates the dataset", async
     ],
   });
 
-  assert.deepEqual(result.imageUris, ["https://bisque2.ece.ucsb.edu/data_service/00-good"]);
+  assert.deepEqual(result.resourceUris, ["https://bisque2.ece.ucsb.edu/data_service/00-good"]);
   assert.equal(result.failed.length, 1);
   assert.equal(result.failed[0].irodsPath, "/ucsb/home/bowen68/test/broken.jpg");
   assert.match(result.failed[0].reason, /Error ingesting file/);
@@ -224,6 +383,9 @@ test("creates a dataset from local files without touching iRODS", async () => {
         headers: {},
         body: `<resource type="uploaded"><image uri="/data_service/00-local-${requests.length}" /></resource>`,
       };
+    }
+    if (url.includes("/data_service/dataset?name=")) {
+      return { status: 200, headers: {}, body: "<resource />" };
     }
     if (url.endsWith("/data_service/dataset")) {
       return { status: 201, headers: {}, body: '<dataset uri="/data_service/00-local-set" />' };
@@ -241,7 +403,7 @@ test("creates a dataset from local files without touching iRODS", async () => {
   });
 
   assert.equal(result.datasetUri, "https://bisque2.ece.ucsb.edu/data_service/00-local-set");
-  assert.equal(result.imageUris.length, 2);
+  assert.equal(result.resourceUris.length, 2);
   assert.deepEqual(result.failed, []);
   assert.equal(
     requests.filter((entry) => entry.url.endsWith("/import/insert_inplace")).length,
@@ -261,6 +423,9 @@ test("keeps going when one local file fails to upload", async () => {
         headers: {},
         body: '<resource type="uploaded"><image uri="/data_service/00-ok" /></resource>',
       };
+    }
+    if (url.includes("/data_service/dataset?name=")) {
+      return { status: 200, headers: {}, body: "<resource />" };
     }
     if (url.endsWith("/data_service/dataset")) {
       return { status: 201, headers: {}, body: '<dataset uri="/data_service/00-set" />' };
@@ -282,7 +447,7 @@ test("keeps going when one local file fails to upload", async () => {
     ],
   });
 
-  assert.deepEqual(result.imageUris, ["https://bisque2.ece.ucsb.edu/data_service/00-ok"]);
+  assert.deepEqual(result.resourceUris, ["https://bisque2.ece.ucsb.edu/data_service/00-ok"]);
   assert.equal(result.failed.length, 1);
   assert.equal(result.failed[0].name, "bad.jpg");
 });
@@ -317,6 +482,9 @@ test("retries transient network and server errors before succeeding", async () =
         body: '<resource type="uploaded"><image uri="/data_service/00-retried" /></resource>',
       };
     }
+    if (url.includes("/data_service/dataset?name=")) {
+      return { status: 200, headers: {}, body: "<resource />" };
+    }
     if (url.endsWith("/data_service/dataset")) {
       return { status: 201, headers: {}, body: '<dataset uri="/data_service/00-set" />' };
     }
@@ -338,7 +506,7 @@ test("retries transient network and server errors before succeeding", async () =
     },
   });
 
-  assert.deepEqual(result.imageUris, ["https://bisque2.ece.ucsb.edu/data_service/00-retried"]);
+  assert.deepEqual(result.resourceUris, ["https://bisque2.ece.ucsb.edu/data_service/00-retried"]);
   assert.deepEqual(result.failed, []);
   assert.equal(transfers, 3);
   assert.equal(retryEvents.length, 2);
