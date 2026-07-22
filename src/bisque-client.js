@@ -201,7 +201,7 @@ class BisqueClient {
     });
     const onRetry = retryNotifier(config, { datasetName });
     const existingDatasetUri = await this.withRetries(
-      () => this.findDatasetByName(datasetName, config.signal),
+      () => this.findDatasetByName(datasetName, config.signal, config.onProgress),
       { signal: config.signal, onRetry },
     );
     const dataset = existingDatasetUri
@@ -226,27 +226,62 @@ class BisqueClient {
     };
   }
 
-  async findDatasetByName(datasetName, signal) {
+  async findDatasetByName(datasetName, signal, onProgress) {
     const cleanName = normalizeDatasetName(datasetName);
-    // Request an explicit view so each <dataset> element carries its `name`
-    // attribute. The default listing view omits it, which made the exact-name
-    // check below reject every match and silently create a duplicate dataset.
+    // Ask for the name filter plus an explicit view so each returned element
+    // carries its `name` attribute. Diagnostic logging below reports exactly
+    // what the server sent back, since BisQue instances differ in whether the
+    // ?name= filter and the listing view include the name.
     const response = await this.authorizedRequest(
       `/data_service/dataset?name=${encodeURIComponent(cleanName)}&view=full`,
       { method: "GET", headers: { Accept: "application/xml, text/xml" }, signal },
     );
     assertSuccess(response, "look up the BisQue dataset name");
 
-    // The query matches server-side, but only trust datasets whose name is an
-    // exact match; take the first one when duplicates exist.
-    for (const tag of extractStartTags(response.body, "dataset")) {
-      const attributes = parseAttributes(tag);
-      if (attributes.name !== cleanName) continue;
-      if (attributes.uri) return normalizeBisqueUri(attributes.uri, this.baseUrl);
-      if (attributes.resource_uniq) {
-        return normalizeBisqueUri(`/data_service/${attributes.resource_uniq}`, this.baseUrl);
+    const candidates = extractStartTags(response.body, "dataset").map(parseAttributes);
+    const named = candidates.filter((attrs) => typeof attrs.name === "string");
+    const uriFor = (attrs) => {
+      if (attrs.uri) return normalizeBisqueUri(attrs.uri, this.baseUrl);
+      if (attrs.resource_uniq) {
+        return normalizeBisqueUri(`/data_service/${attrs.resource_uniq}`, this.baseUrl);
       }
+      return null;
+    };
+
+    notify(onProgress, {
+      stage: "dataset-lookup",
+      message:
+        `Looked up dataset “${cleanName}”: server returned ${candidates.length} dataset element(s)` +
+        (named.length
+          ? `; names: ${named.map((attrs) => `“${String(attrs.name).trim()}”`).join(", ")}.`
+          : candidates.length
+            ? " with no name attribute in the listing."
+            : "."),
+    });
+
+    // 1) Prefer an exact (trimmed) name match when the listing includes names.
+    for (const attrs of named) {
+      if (String(attrs.name).trim() !== cleanName) continue;
+      const uri = uriFor(attrs);
+      if (uri) return uri;
     }
+
+    // 2) The listing omitted names but the server-side name filter narrowed the
+    //    result to a single dataset — trust it as the match rather than
+    //    creating a duplicate.
+    if (named.length === 0 && candidates.length === 1) {
+      const uri = uriFor(candidates[0]);
+      if (uri) return uri;
+    }
+
+    // Nothing safe to append to. Surface a snippet so a mismatch (unexpected
+    // XML shape, filter not applied, name casing) can be diagnosed from the log.
+    notify(onProgress, {
+      stage: "dataset-lookup",
+      message:
+        `No existing dataset matched “${cleanName}”; creating a new one. ` +
+        `Response starts: ${String(response.body || "").slice(0, 240).replace(/\s+/g, " ").trim()}`,
+    });
     return null;
   }
 

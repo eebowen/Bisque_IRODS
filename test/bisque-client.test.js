@@ -279,6 +279,56 @@ test("does not duplicate members that are already in the dataset", async () => {
   );
 });
 
+test("appends to the single dataset the server matched even without a name attribute", async () => {
+  const requests = [];
+  const request = async (url, options) => {
+    requests.push({ url, options });
+    if (url.endsWith("/import/insert_inplace")) {
+      return {
+        status: 200,
+        headers: {},
+        body: '<resource type="uploaded"><image uri="/data_service/00-new" /></resource>',
+      };
+    }
+    if (url.includes("/data_service/dataset?name=")) {
+      // The server filtered by name but the listing carries no name attribute.
+      // A single match should still be treated as the existing dataset.
+      return {
+        status: 200,
+        headers: {},
+        body: '<resource><dataset uri="/data_service/00-existing" /></resource>',
+      };
+    }
+    if (url.includes("/data_service/00-existing?view=full")) {
+      return {
+        status: 200,
+        headers: {},
+        body:
+          '<dataset uri="/data_service/00-existing">' +
+          '<value index="0" type="object">https://bisque2.ece.ucsb.edu/data_service/00-old</value>' +
+          "</dataset>",
+      };
+    }
+    if (url.endsWith("/data_service/00-existing")) {
+      return { status: 200, headers: {}, body: '<dataset uri="/data_service/00-existing" />' };
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+  const client = new BisqueClient({ username: "bowen68", password: "secret", request });
+
+  const result = await client.createDatasetFromIrodsPaths({
+    datasetName: "July scans",
+    irodsPaths: ["/ucsb/home/bowen68/test/new.jpg"],
+  });
+
+  assert.equal(result.appendedToExisting, true);
+  assert.equal(result.addedCount, 1);
+  const creations = requests.filter(
+    (entry) => entry.url.endsWith("/data_service/dataset") && entry.options.method === "POST",
+  );
+  assert.equal(creations.length, 0, "must not create a duplicate dataset");
+});
+
 test("does not create an empty dataset when BisQue returns no resources", async () => {
   const request = async () => ({
     status: 200,

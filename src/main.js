@@ -61,6 +61,27 @@ function credentialsPath() {
   return getUserDataPath("credentials.json");
 }
 
+function settingsPath() {
+  return getUserDataPath("settings.json");
+}
+
+async function loadSettings() {
+  try {
+    const parsed = JSON.parse(await fsp.readFile(settingsPath(), "utf8"));
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    // Missing or unreadable settings are not fatal; start from defaults.
+    return {};
+  }
+}
+
+async function saveSettings(patch) {
+  const next = { ...(await loadSettings()), ...patch };
+  await fsp.mkdir(app.getPath("userData"), { recursive: true });
+  await fsp.writeFile(settingsPath(), JSON.stringify(next, null, 2), "utf8");
+  return next;
+}
+
 function defaultRemotePath(username) {
   return `/ucsb/home/${username}/`;
 }
@@ -729,6 +750,9 @@ async function runUpload(uploadId, payload) {
     }
 
     const datasetName = normalizeDatasetName(payload.datasetName);
+    // Remember the dataset name so the field can default to it next launch.
+    // Best-effort: never let a settings write failure block the upload.
+    saveSettings({ lastDatasetName: datasetName }).catch(() => {});
     const summary = await summarizePaths(localPaths);
     const controller = new AbortController();
     activeUploads.set(uploadId, { cancelled: false, child: null, controller });
@@ -767,6 +791,8 @@ async function runUpload(uploadId, payload) {
               percent: 98,
               message: `Adding ${event.total} file${event.total === 1 ? "" : "s"} to BisQue dataset “${event.datasetName}”...`,
             });
+          } else if (event.stage === "dataset-lookup") {
+            sendUploadEvent(uploadId, { type: "dataset-lookup", message: event.message });
           }
         },
       });
@@ -870,6 +896,8 @@ async function runUpload(uploadId, payload) {
             percent: 98,
             message: `Adding ${event.total} file${event.total === 1 ? "" : "s"} to BisQue dataset “${event.datasetName}”...`,
           });
+        } else if (event.stage === "dataset-lookup") {
+          sendUploadEvent(uploadId, { type: "dataset-lookup", message: event.message });
         }
       },
     });
@@ -899,6 +927,11 @@ ipcMain.handle("auth:getProfile", async () => {
     username: credentials.username,
     defaultRemotePath: defaultRemotePath(credentials.username),
   };
+});
+
+ipcMain.handle("settings:getLastDatasetName", async () => {
+  const settings = await loadSettings();
+  return typeof settings.lastDatasetName === "string" ? settings.lastDatasetName : "";
 });
 
 ipcMain.handle("irods:testConnection", async () => {

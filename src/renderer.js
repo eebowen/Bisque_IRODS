@@ -48,6 +48,14 @@ async function init() {
     elements.remotePath.value = profile.defaultRemotePath;
     setAuthStatus(`Saved login for ${profile.username}.`, "success");
   }
+
+  // Default the dataset name to whatever was used last, so repeat uploads to
+  // the same dataset don't require retyping it.
+  const lastDatasetName = await window.bisque.settings.getLastDatasetName();
+  if (lastDatasetName && !elements.datasetName.value.trim()) {
+    elements.datasetName.value = lastDatasetName;
+    updateStartAvailability();
+  }
 }
 
 function wireEvents() {
@@ -264,7 +272,8 @@ function resetProgress() {
 async function clearCompletedSelection() {
   state.localPaths = [];
   state.summary = null;
-  elements.datasetName.value = "";
+  // Keep the dataset name so the next batch can append to the same dataset
+  // without retyping it.
   renderSummary();
 }
 

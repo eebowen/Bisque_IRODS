@@ -8,6 +8,9 @@ contextBridge.exposeInMainWorld("bisque", {
     saveCredentials: (credentials) => ipcRenderer.invoke("auth:saveCredentials", credentials),
     getProfile: () => ipcRenderer.invoke("auth:getProfile"),
   },
+  settings: {
+    getLastDatasetName: () => ipcRenderer.invoke("settings:getLastDatasetName"),
+  },
   irods: {
     testConnection: () => ipcRenderer.invoke("irods:testConnection"),
   },
