@@ -40,7 +40,7 @@ jobs:
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
         with:
-          name: BisQue-iRODS-Uploader-mac-universal
-          path: dist/BisQue-iRODS-Uploader-mac-universal.zip
+          name: BisqueUploader-mac-universal
+          path: dist/BisqueUploader-mac-universal.zip
           if-no-files-found: error
           retention-days: 14

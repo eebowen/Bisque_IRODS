@@ -30,7 +30,7 @@ function createWindow() {
     height: 780,
     minWidth: 920,
     minHeight: 680,
-    title: "BisQue iRODS Uploader",
+    title: "BisqueUploader",
     backgroundColor: "#f6f5f2",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),

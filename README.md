@@ -1,4 +1,4 @@
-# BisQue iRODS Uploader
+# BisqueUploader
 
 A local Electron desktop app for uploading files and folders to BisQue iRODS storage without using the terminal. After upload, the desktop app registers the images with BisQue and creates one new BisQue dataset using the name supplied by the user.
 
@@ -47,7 +47,7 @@ Run:
 The script creates:
 
 ```text
-dist/BisQue-iRODS-Uploader-win-x64.exe
+dist/BisqueUploader-win-x64.exe
 ```
 
 ### macOS
@@ -67,7 +67,7 @@ Run:
 The script creates:
 
 ```text
-dist/BisQue-iRODS-Uploader-mac-universal.zip
+dist/BisqueUploader-mac-universal.zip
 ```
 
 For an optional local DMG build, run:
@@ -95,7 +95,7 @@ Run:
 The script creates:
 
 ```text
-dist/BisQue-iRODS-Uploader-linux-x64.AppImage
+dist/BisqueUploader-linux-x64.AppImage
 ```
 
 For a direct packaging command, run:

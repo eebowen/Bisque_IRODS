@@ -1,4 +1,4 @@
-# BisQue iRODS Uploader Desktop App Plan
+# BisqueUploader Desktop App Plan
 
 ## Summary
 Build a local desktop app, not a plain `.html` file. A directly opened HTML page cannot safely run `gocmd`, access arbitrary folders, store credentials in the OS keychain, or stream uploads to iRODS like the CLI. The right version is a browser-like desktop app: simple HTML UI for users, plus a local app process that wraps GoCommands.

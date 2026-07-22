@@ -27,6 +27,6 @@ if !errorlevel! neq 0 (
 
 echo.
 echo Windows app artifact:
-dir /b dist\BisQue-iRODS-Uploader-win-x64.exe
+dir /b dist\BisqueUploader-win-x64.exe
 
 popd

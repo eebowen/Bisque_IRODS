@@ -20,4 +20,4 @@ PUBLISH=never npm run dist:mac
 
 echo
 echo "Mac app artifact:"
-ls -1 dist/BisQue-iRODS-Uploader-mac-universal.zip
+ls -1 dist/BisqueUploader-mac-universal.zip

@@ -20,4 +20,4 @@ PUBLISH=never npm run dist:linux
 
 echo
 echo "Linux app artifact:"
-ls -1 dist/BisQue-iRODS-Uploader-linux-x64.AppImage
+ls -1 dist/BisqueUploader-linux-x64.AppImage
