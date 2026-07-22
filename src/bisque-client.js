@@ -228,18 +228,19 @@ class BisqueClient {
 
   async findDatasetByName(datasetName, signal, onProgress) {
     const cleanName = normalizeDatasetName(datasetName);
-    // Ask for the name filter plus an explicit view so each returned element
-    // carries its `name` attribute. Diagnostic logging below reports exactly
-    // what the server sent back, since BisQue instances differ in whether the
-    // ?name= filter and the listing view include the name.
+    // List the datasets and match the name ourselves instead of relying on a
+    // server-side ?name= filter. That filter is unreliable across BisQue
+    // instances — bisque2.ece.ucsb.edu returns an empty result for ?name=X even
+    // when a dataset named X exists, which made every upload create a duplicate.
+    // A short-view listing returns each dataset's `name`/`uri` attributes
+    // without its tag subtree, so it stays small and matching is exact.
     const response = await this.authorizedRequest(
-      `/data_service/dataset?name=${encodeURIComponent(cleanName)}&view=full`,
+      "/data_service/dataset?view=short&limit=10000",
       { method: "GET", headers: { Accept: "application/xml, text/xml" }, signal },
     );
     assertSuccess(response, "look up the BisQue dataset name");
 
     const candidates = extractStartTags(response.body, "dataset").map(parseAttributes);
-    const named = candidates.filter((attrs) => typeof attrs.name === "string");
     const uriFor = (attrs) => {
       if (attrs.uri) return normalizeBisqueUri(attrs.uri, this.baseUrl);
       if (attrs.resource_uniq) {
@@ -247,35 +248,27 @@ class BisqueClient {
       }
       return null;
     };
+    const matches = candidates.filter(
+      (attrs) => typeof attrs.name === "string" && String(attrs.name).trim() === cleanName,
+    );
 
     notify(onProgress, {
       stage: "dataset-lookup",
       message:
-        `Looked up dataset “${cleanName}”: server returned ${candidates.length} dataset element(s)` +
-        (named.length
-          ? `; names: ${named.map((attrs) => `“${String(attrs.name).trim()}”`).join(", ")}.`
-          : candidates.length
-            ? " with no name attribute in the listing."
-            : "."),
+        `Looked up dataset “${cleanName}”: ${candidates.length} dataset(s) visible, ` +
+        `${matches.length} named “${cleanName}”.`,
     });
 
-    // 1) Prefer an exact (trimmed) name match when the listing includes names.
-    for (const attrs of named) {
-      if (String(attrs.name).trim() !== cleanName) continue;
-      const uri = uriFor(attrs);
-      if (uri) return uri;
-    }
+    // Prefer the most recently created match so repeat uploads keep appending to
+    // the same (newest) dataset even if older same-named duplicates linger.
+    const best = matches
+      .map((attrs) => ({ uri: uriFor(attrs), ts: datasetTimestamp(attrs) }))
+      .filter((entry) => entry.uri)
+      .sort((a, b) => b.ts - a.ts)[0];
+    if (best) return best.uri;
 
-    // 2) The listing omitted names but the server-side name filter narrowed the
-    //    result to a single dataset — trust it as the match rather than
-    //    creating a duplicate.
-    if (named.length === 0 && candidates.length === 1) {
-      const uri = uriFor(candidates[0]);
-      if (uri) return uri;
-    }
-
-    // Nothing safe to append to. Surface a snippet so a mismatch (unexpected
-    // XML shape, filter not applied, name casing) can be diagnosed from the log.
+    // Nothing to append to. Surface a snippet so an unexpected XML shape (for
+    // example a listing that omits the name attribute) can be diagnosed.
     notify(onProgress, {
       stage: "dataset-lookup",
       message:
@@ -780,6 +773,14 @@ function parseAttributes(source) {
     attributes[match[1]] = decodeXml(match[2] == null ? match[3] : match[2]);
   }
   return attributes;
+}
+
+// Parse a dataset's creation/modification timestamp so same-named duplicates
+// can be ranked newest-first. Returns 0 when the listing has no usable time.
+function datasetTimestamp(attrs) {
+  const raw = String((attrs && (attrs.ts || attrs.created)) || "");
+  const parsed = Date.parse(raw);
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 function normalizeDatasetName(value) {

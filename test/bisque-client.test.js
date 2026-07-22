@@ -58,7 +58,7 @@ test("registers uploaded paths and creates one named BisQue dataset", async () =
         body: '<resource type="uploaded"><image uri="/data_service/00-image" /></resource>',
       };
     }
-    if (url.includes("/data_service/dataset?name=")) {
+    if (url.includes("/data_service/dataset?view=")) {
       return { status: 200, headers: {}, body: "<resource />" };
     }
     if (url.endsWith("/data_service/dataset")) {
@@ -89,7 +89,7 @@ test("registers uploaded paths and creates one named BisQue dataset", async () =
   );
   assert.match(requests[0].options.headers.Authorization, /^Basic /);
   assert.equal(requests[0].options.body.includes("secret"), false);
-  assert.match(requests[1].url, /\/data_service\/dataset\?name=A%20%26%20B&view=full$/);
+  assert.match(requests[1].url, /\/data_service\/dataset\?view=short&limit=10000$/);
   assert.equal(
     requests[2].options.body,
     '<dataset name="A &amp; B"><value type="object">https://bisque2.ece.ucsb.edu/data_service/00-image</value></dataset>',
@@ -114,7 +114,7 @@ test("expands a BisQue dataset returned while registering a multi-image file", a
           '<value type="object">/data_service/00-b</value></dataset>',
       };
     }
-    if (url.includes("/data_service/dataset?name=")) {
+    if (url.includes("/data_service/dataset?view=")) {
       return { status: 200, headers: {}, body: "<resource />" };
     }
     if (url.endsWith("/data_service/dataset")) {
@@ -146,7 +146,7 @@ test("adds non-image files such as PDFs to the dataset", async () => {
         body: '<resource type="uploaded"><file uri="/data_service/00-file" /></resource>',
       };
     }
-    if (url.includes("/data_service/dataset?name=")) {
+    if (url.includes("/data_service/dataset?view=")) {
       return { status: 200, headers: {}, body: "<resource />" };
     }
     if (url.endsWith("/data_service/dataset")) {
@@ -181,14 +181,19 @@ test("adds new files to an existing BisQue dataset with the same name", async ()
         body: '<resource type="uploaded"><image uri="/data_service/00-new" /></resource>',
       };
     }
-    if (url.includes("/data_service/dataset?name=")) {
-      // BisQue only includes the `name` attribute when an explicit view is
-      // requested; the default listing omits it. Model that here so this test
-      // fails (duplicate dataset created) if the view parameter is dropped.
-      const body = url.includes("view=full")
-        ? '<resource><dataset name="July scans" uri="/data_service/00-existing" /></resource>'
-        : '<resource><dataset uri="/data_service/00-existing" /></resource>';
-      return { status: 200, headers: {}, body };
+    if (url.includes("/data_service/dataset?view=")) {
+      // The server does not filter by name (bisque2 ignores ?name=), so the
+      // listing returns every dataset. The client must pick the one whose name
+      // attribute matches exactly rather than creating a duplicate.
+      return {
+        status: 200,
+        headers: {},
+        body:
+          '<resource>' +
+          '<dataset name="June scans" uri="/data_service/00-other" />' +
+          '<dataset name="July scans" uri="/data_service/00-existing" />' +
+          '</resource>',
+      };
     }
     if (url.includes("/data_service/00-existing?view=full")) {
       return {
@@ -244,7 +249,7 @@ test("does not duplicate members that are already in the dataset", async () => {
         body: '<resource type="uploaded"><image uri="/data_service/00-old" /></resource>',
       };
     }
-    if (url.includes("/data_service/dataset?name=")) {
+    if (url.includes("/data_service/dataset?view=")) {
       return {
         status: 200,
         headers: {},
@@ -279,7 +284,7 @@ test("does not duplicate members that are already in the dataset", async () => {
   );
 });
 
-test("appends to the single dataset the server matched even without a name attribute", async () => {
+test("appends to the newest dataset when same-named duplicates already exist", async () => {
   const requests = [];
   const request = async (url, options) => {
     requests.push({ url, options });
@@ -290,27 +295,31 @@ test("appends to the single dataset the server matched even without a name attri
         body: '<resource type="uploaded"><image uri="/data_service/00-new" /></resource>',
       };
     }
-    if (url.includes("/data_service/dataset?name=")) {
-      // The server filtered by name but the listing carries no name attribute.
-      // A single match should still be treated as the existing dataset.
-      return {
-        status: 200,
-        headers: {},
-        body: '<resource><dataset uri="/data_service/00-existing" /></resource>',
-      };
-    }
-    if (url.includes("/data_service/00-existing?view=full")) {
+    if (url.includes("/data_service/dataset?view=")) {
+      // Two datasets share the name (left over from the old duplicate bug). The
+      // client should append to the most recently created one, not make a third.
       return {
         status: 200,
         headers: {},
         body:
-          '<dataset uri="/data_service/00-existing">' +
+          '<resource>' +
+          '<dataset name="July scans" uri="/data_service/00-old-set" ts="2026-01-01T00:00:00Z" />' +
+          '<dataset name="July scans" uri="/data_service/00-new-set" ts="2026-07-01T00:00:00Z" />' +
+          '</resource>',
+      };
+    }
+    if (url.includes("/data_service/00-new-set?view=full")) {
+      return {
+        status: 200,
+        headers: {},
+        body:
+          '<dataset name="July scans" uri="/data_service/00-new-set">' +
           '<value index="0" type="object">https://bisque2.ece.ucsb.edu/data_service/00-old</value>' +
           "</dataset>",
       };
     }
-    if (url.endsWith("/data_service/00-existing")) {
-      return { status: 200, headers: {}, body: '<dataset uri="/data_service/00-existing" />' };
+    if (url.endsWith("/data_service/00-new-set")) {
+      return { status: 200, headers: {}, body: '<dataset uri="/data_service/00-new-set" />' };
     }
     throw new Error(`Unexpected request: ${url}`);
   };
@@ -321,6 +330,7 @@ test("appends to the single dataset the server matched even without a name attri
     irodsPaths: ["/ucsb/home/bowen68/test/new.jpg"],
   });
 
+  assert.equal(result.datasetUri, "https://bisque2.ece.ucsb.edu/data_service/00-new-set");
   assert.equal(result.appendedToExisting, true);
   assert.equal(result.addedCount, 1);
   const creations = requests.filter(
@@ -364,7 +374,7 @@ test("falls back to a direct BisQue upload when in-place registration fails", as
         body: '<resource type="uploaded"><image uri="/data_service/00-direct" /></resource>',
       };
     }
-    if (url.includes("/data_service/dataset?name=")) {
+    if (url.includes("/data_service/dataset?view=")) {
       return { status: 200, headers: {}, body: "<resource />" };
     }
     if (url.endsWith("/data_service/dataset")) {
@@ -401,7 +411,7 @@ test("reports files that fail registration and still creates the dataset", async
           : '<resource type="uploaded"><image uri="/data_service/00-good" /></resource>',
       };
     }
-    if (url.includes("/data_service/dataset?name=")) {
+    if (url.includes("/data_service/dataset?view=")) {
       return { status: 200, headers: {}, body: "<resource />" };
     }
     if (url.endsWith("/data_service/dataset")) {
@@ -436,7 +446,7 @@ test("creates a dataset from local files without touching iRODS", async () => {
         body: `<resource type="uploaded"><image uri="/data_service/00-local-${requests.length}" /></resource>`,
       };
     }
-    if (url.includes("/data_service/dataset?name=")) {
+    if (url.includes("/data_service/dataset?view=")) {
       return { status: 200, headers: {}, body: "<resource />" };
     }
     if (url.endsWith("/data_service/dataset")) {
@@ -476,7 +486,7 @@ test("keeps going when one local file fails to upload", async () => {
         body: '<resource type="uploaded"><image uri="/data_service/00-ok" /></resource>',
       };
     }
-    if (url.includes("/data_service/dataset?name=")) {
+    if (url.includes("/data_service/dataset?view=")) {
       return { status: 200, headers: {}, body: "<resource />" };
     }
     if (url.endsWith("/data_service/dataset")) {
@@ -534,7 +544,7 @@ test("retries transient network and server errors before succeeding", async () =
         body: '<resource type="uploaded"><image uri="/data_service/00-retried" /></resource>',
       };
     }
-    if (url.includes("/data_service/dataset?name=")) {
+    if (url.includes("/data_service/dataset?view=")) {
       return { status: 200, headers: {}, body: "<resource />" };
     }
     if (url.endsWith("/data_service/dataset")) {
