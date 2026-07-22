@@ -228,8 +228,11 @@ class BisqueClient {
 
   async findDatasetByName(datasetName, signal) {
     const cleanName = normalizeDatasetName(datasetName);
+    // Request an explicit view so each <dataset> element carries its `name`
+    // attribute. The default listing view omits it, which made the exact-name
+    // check below reject every match and silently create a duplicate dataset.
     const response = await this.authorizedRequest(
-      `/data_service/dataset?name=${encodeURIComponent(cleanName)}`,
+      `/data_service/dataset?name=${encodeURIComponent(cleanName)}&view=full`,
       { method: "GET", headers: { Accept: "application/xml, text/xml" }, signal },
     );
     assertSuccess(response, "look up the BisQue dataset name");

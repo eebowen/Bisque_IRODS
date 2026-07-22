@@ -89,7 +89,7 @@ test("registers uploaded paths and creates one named BisQue dataset", async () =
   );
   assert.match(requests[0].options.headers.Authorization, /^Basic /);
   assert.equal(requests[0].options.body.includes("secret"), false);
-  assert.match(requests[1].url, /\/data_service\/dataset\?name=A%20%26%20B$/);
+  assert.match(requests[1].url, /\/data_service\/dataset\?name=A%20%26%20B&view=full$/);
   assert.equal(
     requests[2].options.body,
     '<dataset name="A &amp; B"><value type="object">https://bisque2.ece.ucsb.edu/data_service/00-image</value></dataset>',
@@ -182,11 +182,13 @@ test("adds new files to an existing BisQue dataset with the same name", async ()
       };
     }
     if (url.includes("/data_service/dataset?name=")) {
-      return {
-        status: 200,
-        headers: {},
-        body: '<resource><dataset name="July scans" uri="/data_service/00-existing" /></resource>',
-      };
+      // BisQue only includes the `name` attribute when an explicit view is
+      // requested; the default listing omits it. Model that here so this test
+      // fails (duplicate dataset created) if the view parameter is dropped.
+      const body = url.includes("view=full")
+        ? '<resource><dataset name="July scans" uri="/data_service/00-existing" /></resource>'
+        : '<resource><dataset uri="/data_service/00-existing" /></resource>';
+      return { status: 200, headers: {}, body };
     }
     if (url.includes("/data_service/00-existing?view=full")) {
       return {
